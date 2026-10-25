@@ -1,0 +1,29 @@
+{
+  "name": "@local/dsh-balance",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DeepSeek API 账户余额：侧边栏余额胶囊 + 设置行，Host 侧读取 /user/balance。",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4"
+  }
+}

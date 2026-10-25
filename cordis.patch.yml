@@ -1,0 +1,6 @@
+# Bundle form of the profile row. The profile patch in `/root/.dsh/profiles/web`
+# already inserts this row by absolute path; installing this directory as a
+# bundle later (`plugin_manager install_bundle`) should drop that manual row.
+- insert:
+    - id: dsh-balance
+      name: '@local/dsh-balance'
