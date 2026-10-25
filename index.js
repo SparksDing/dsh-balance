@@ -3,16 +3,17 @@
  * balances for the browser plugin, and serves the JSON state the UI polls.
  *
  * The balance read happens here rather than in the browser so the API key
- * never reaches the page (and because api.deepseek.com allows no CORS). The
- * state route rides Connection's authenticated `/api` channel; the separate
- * unauthenticated ping names the plugin only and carries no account data.
+ * never reaches the page (and because api.deepseek.com allows no CORS). Both
+ * routes ride Connection's authenticated `/api` channel, so only a signed-in
+ * page can read the balance or store a key; the separate unauthenticated ping
+ * names the plugin only and carries no account data.
  *
  * @module @local/dsh-balance
  */
 
-import { readFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 /** Stable Cordis plugin name; the Client module registers under the package name. */
 export const name = '@local/dsh-balance'
@@ -24,12 +25,18 @@ export const inject = ['connection', 'webServer']
 const DEFAULT_API_BASE = 'https://api.deepseek.com'
 /** Authenticated state route, absolute below `/api`. */
 const STATE_PATH = '/api/deepseek-balance/state'
+/** Authenticated key write route; only a signed-in page reaches it. */
+const KEY_PATH = '/api/deepseek-balance/key'
 /** Unauthenticated liveness probe naming this plugin and nothing else. */
 const PING_PATH = '/dsh-balance/ping'
 /** Key file used when neither config nor environment supplies one. */
 const DEFAULT_KEY_FILE = join(homedir(), '.config', 'deepseek', 'api_key')
 /** DeepSeek answers 401 for a missing, deleted, or mistyped key. */
 const UNAUTHORIZED = 401
+/** Shape of a DeepSeek API key: `sk-` followed by an opaque tail. */
+const KEY_PATTERN = /^sk-[A-Za-z0-9_-]{16,}$/
+/** Upper bound on an accepted key, so a stray paste cannot fill the disk. */
+const MAX_KEY_LENGTH = 200
 
 /**
  * Expand one leading `~/` against the home directory.
@@ -47,6 +54,19 @@ function expandHome(path) {
  */
 function maskTail(key) {
   return key.length <= 4 ? '' : key.slice(-4)
+}
+
+/**
+ * Build one JSON response with no-store caching.
+ * @param status - HTTP status code.
+ * @param body - JSON-serializable payload.
+ * @returns the response.
+ */
+function json(status, body) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  })
 }
 
 /**
@@ -117,7 +137,7 @@ async function queryBalance(apiBase, key, timeoutMs) {
 }
 
 /**
- * Register the balance state route and its ping.
+ * Register the balance state route, the key write route, and the ping.
  * @param ctx - Cordis context carrying `connection`, `webServer`, and the plugin fiber.
  * @param raw - profile patch row config (`apiKey`, `apiKeyFile`, `apiBase`, `timeoutMs`, `cacheMs`).
  */
@@ -189,15 +209,89 @@ export function apply(ctx, raw = {}) {
     }
   }
 
+  /**
+   * Verify one candidate key before it is stored, so a typo never replaces a
+   * working key file.
+   * @param candidate - trimmed key text from the page.
+   * @returns `{ ok: true, ...state }` after storing, or a failure response body.
+   */
+  const storeKey = async (candidate) => {
+    if (candidate.length > MAX_KEY_LENGTH || !KEY_PATTERN.test(candidate)) {
+      return { status: 400, body: { ok: false, error: { code: 'invalid-key', message: 'key 应以 sk- 开头' } } }
+    }
+    const verified = await queryBalance(apiBase, candidate, timeoutMs)
+    if (!verified.ok) {
+      return { status: verified.error.code === 'unauthorized' ? 400 : 502, body: { ok: false, error: verified.error } }
+    }
+    try {
+      await mkdir(dirname(keyFile), { recursive: true, mode: 0o700 })
+      await writeFile(keyFile, candidate, { mode: 0o600 })
+      await chmod(keyFile, 0o600)
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return { status: 500, body: { ok: false, error: { code: 'write-failed', message: detail } } }
+    }
+    const state = {
+      apiBase,
+      keyFile,
+      fetchedAt: Date.now(),
+      configured: true,
+      source: 'file',
+      keyTail: maskTail(candidate),
+      ok: true,
+      isAvailable: verified.isAvailable,
+      wallets: verified.wallets,
+      error: null,
+    }
+    cached = { at: Date.now(), value: state }
+    return { status: 200, body: { ...state, saved: true } }
+  }
+
+  /** Remove the stored key file and report the resulting state. */
+  const clearKey = async () => {
+    try {
+      await rm(keyFile, { force: true })
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      return { status: 500, body: { ok: false, error: { code: 'write-failed', message: detail } } }
+    }
+    cached = undefined
+    return { status: 200, body: { ...(await readState()), cleared: true } }
+  }
+
+  /**
+   * Handle one key write: `{ apiKey }` stores a verified key, `{ clear: true }` removes it.
+   * @param request - authenticated POST below `/api`.
+   * @returns the response.
+   */
+  const handleKey = async (request) => {
+    const mediaType = (request.headers.get('content-type') ?? '').toLowerCase()
+    if (!mediaType.startsWith('application/json')) {
+      return json(415, { ok: false, error: { code: 'unsupported-media-type', message: 'expect application/json' } })
+    }
+    const payload = await request.json().catch(() => undefined)
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      return json(400, { ok: false, error: { code: 'bad-request', message: 'expect a JSON object' } })
+    }
+    const outcome = payload.clear === true
+      ? await clearKey()
+      : await storeKey(typeof payload.apiKey === 'string' ? payload.apiKey.trim() : '')
+    return json(outcome.status, outcome.body)
+  }
+
   ctx.effect(() => ctx.connection.fetch.register({
     path: STATE_PATH,
     methods: ['GET'],
     requestBody: 'buffered',
-    fetch: async () => new Response(JSON.stringify(await readState()), {
-      status: 200,
-      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-    }),
+    fetch: async () => json(200, await readState()),
   }), 'dsh-balance: state route')
+
+  ctx.effect(() => ctx.connection.fetch.register({
+    path: KEY_PATH,
+    methods: ['POST'],
+    requestBody: 'buffered',
+    fetch: handleKey,
+  }), 'dsh-balance: key route')
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -208,5 +302,5 @@ export function apply(ctx, raw = {}) {
     },
   }), 'dsh-balance: ping route')
 
-  ctx.logger?.info?.('[dsh-balance] state route ready: %s -> %s/user/balance', STATE_PATH, apiBase)
+  ctx.logger?.info?.('[dsh-balance] routes ready: %s, %s -> %s/user/balance', STATE_PATH, KEY_PATH, apiBase)
 }

@@ -1,6 +1,8 @@
 /**
  * Browser half of `@local/dsh-balance`: a sidebar balance pill and a General
- * settings row, both polling the authenticated Host state route.
+ * settings row, both polling the authenticated Host state route. The row also
+ * stores or clears the API key through the Host, so the key never enters the
+ * page or the plugin bundle.
  *
  * The module registers one lazy factory with `window.__ModuleLoader__`; the id
  * equals the package name. React comes from the shared platform module table.
@@ -14,8 +16,9 @@ window.__ModuleLoader__.load({
 
     /** Dictionary namespace owned by this plugin. */
     const NS = 'dshBalance'
-    /** Host route relative to the page origin, behind Connection's authentication. */
+    /** Host routes relative to the page origin, behind Connection's authentication. */
     const ROUTE = '/api/deepseek-balance/state'
+    const KEY_ROUTE = '/api/deepseek-balance/key'
     /** Background refresh cadence while the page is open. */
     const POLL_MS = 30_000
     /** Currency symbols for the wallets DeepSeek reports. */
@@ -29,12 +32,28 @@ window.__ModuleLoader__.load({
       poll: '每 30 秒自动刷新',
       granted: '含赠送 {amount}',
       toppedUp: '充值 {amount}',
-      missingKey: '未配置 API key：把 key 写入 {path}',
+      missingKey: '未配置 API key：点下面的「设置 key」直接粘贴保存',
       unauthorized: 'API key 无效、已删除或已过期',
       failed: '查询失败：{message}',
       empty: '账户没有钱包记录',
       unconfiguredShort: '未配置',
       errorShort: '查询失败',
+      setKey: '设置 key',
+      changeKey: '更换 key',
+      clearKey: '清除',
+      confirmClear: '确认清除？',
+      cancel: '取消',
+      save: '保存',
+      saving: '校验中…',
+      keyPlaceholder: 'sk-...（只会写进这台机器的 key 文件）',
+      keyHint: '保存前会先查一次余额校验；文件写入 {path}，权限 600。',
+      invalidKey: 'key 格式不对，应该是 sk- 开头',
+      keySaved: '已保存',
+      keyCleared: '已清除',
+      sourceConfig: '插件配置',
+      sourceEnv: '环境变量',
+      sourceWarning: '当前 key 来自{source}，文件里的设置不生效',
+      keyTailLabel: '当前 key …{tail}',
     }
 
     const en = {
@@ -45,12 +64,28 @@ window.__ModuleLoader__.load({
       poll: 'Refreshes every 30s',
       granted: '+{amount} granted',
       toppedUp: '{amount} topped up',
-      missingKey: 'No API key: write one to {path}',
+      missingKey: 'No API key yet — use "Set key" below to paste one',
       unauthorized: 'API key is invalid, deleted, or expired',
       failed: 'Query failed: {message}',
       empty: 'No wallet on this account',
       unconfiguredShort: 'No key',
       errorShort: 'Unavailable',
+      setKey: 'Set key',
+      changeKey: 'Change key',
+      clearKey: 'Clear',
+      confirmClear: 'Confirm clear?',
+      cancel: 'Cancel',
+      save: 'Save',
+      saving: 'Verifying…',
+      keyPlaceholder: 'sk-... (stored on this machine only)',
+      keyHint: 'The key is verified against the balance endpoint before saving, then written to {path} with mode 600.',
+      invalidKey: 'Not a valid key: it should start with sk-',
+      keySaved: 'Saved',
+      keyCleared: 'Cleared',
+      sourceConfig: 'the plugin config',
+      sourceEnv: 'the environment',
+      sourceWarning: 'The key comes from {source}, so the stored file is ignored',
+      keyTailLabel: 'key …{tail}',
     }
 
     /**
@@ -99,6 +134,10 @@ window.__ModuleLoader__.load({
           return () => { listeners.delete(listener) }
         },
         refresh,
+        /** Adopt one Host state response (after a save or clear) without a second read. */
+        replace(data) {
+          publish({ phase: 'ready', data, transportError: undefined })
+        },
       }
     }
 
@@ -151,7 +190,7 @@ window.__ModuleLoader__.load({
       }
       const error = data.error ?? { code: 'unknown', message: state.transportError ?? 'unknown' }
       const detail = error.code === 'missing-key'
-        ? t('missingKey', { path: data.keyFile })
+        ? t('missingKey')
         : error.code === 'unauthorized'
           ? t('unauthorized')
           : t('failed', { message: error.message ?? '' })
@@ -195,6 +234,35 @@ window.__ModuleLoader__.load({
         lineHeight: '22px',
         cursor: 'pointer',
       },
+      link: {
+        border: 'none',
+        background: 'transparent',
+        padding: 0,
+        font: 'inherit',
+        fontSize: 12,
+        lineHeight: '18px',
+        color: 'var(--dsw-alias-state-business-primary)',
+        cursor: 'pointer',
+      },
+      hint: {
+        flexBasis: '100%',
+        fontSize: 12,
+        lineHeight: '18px',
+        color: 'var(--dsw-alias-label-tertiary)',
+      },
+      input: {
+        flex: 1,
+        minWidth: 160,
+        height: 30,
+        padding: '0 8px',
+        border: '0.5px solid var(--dsw-alias-border-l3)',
+        borderRadius: 'var(--dsw-radius-md)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-primary)',
+        font: 'inherit',
+        fontSize: 13,
+        lineHeight: '20px',
+      },
       pill: {
         display: 'inline-flex',
         alignItems: 'center',
@@ -216,44 +284,167 @@ window.__ModuleLoader__.load({
       },
     }
 
+    /** One inline action link. */
+    function ActionLink({ label, onClick, disabled }) {
+      return h('button', {
+        type: 'button',
+        style: { ...TEXT.link, opacity: disabled ? 0.5 : 1 },
+        disabled: disabled === true,
+        onClick,
+      }, label)
+    }
+
     /**
-     * Settings → General row: title, state detail, and a refresh control.
+     * Settings → General row: title, state detail, refresh, and the key editor.
      * @param props - composed slot props (locale seat plus the injected store).
      * @returns the row element tree.
      */
     function BalanceRow({ t, bal }) {
       const state = useBalance(bal)
       const view = describe(state, t)
+      const data = state.data
+      const [editing, setEditing] = React.useState(false)
+      const [draft, setDraft] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState(undefined)
+      const [notice, setNotice] = React.useState(undefined)
+      const [confirmClear, setConfirmClear] = React.useState(false)
       const pending = state.phase === 'loading'
+      const configured = data?.configured === true
+      const keyFile = data?.keyFile ?? '~/.config/deepseek/api_key'
+      const busyNote = busy ? t('saving') : undefined
+
+      /** Send one key write and adopt the returned state on success. */
+      const send = async (body) => {
+        setBusy(true)
+        setError(undefined)
+        setNotice(undefined)
+        try {
+          const response = await fetch(KEY_ROUTE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          })
+          const value = await response.json().catch(() => undefined)
+          if (!response.ok || value?.ok !== true) {
+            const code = value?.error?.code
+            setError(code === 'invalid-key'
+              ? t('invalidKey')
+              : t('failed', { message: value?.error?.message ?? `HTTP ${response.status}` }))
+            return false
+          }
+          bal.replace(value)
+          return true
+        } catch (failure) {
+          setError(t('failed', { message: failure instanceof Error ? failure.message : String(failure) }))
+          return false
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const save = async () => {
+        if (draft.trim() === '') {
+          setError(t('invalidKey'))
+          return
+        }
+        if (await send({ apiKey: draft.trim() })) {
+          setEditing(false)
+          setDraft('')
+          setNotice(t('keySaved'))
+        }
+      }
+
+      const clear = async () => {
+        if (confirmClear !== true) {
+          setConfirmClear(true)
+          return
+        }
+        setConfirmClear(false)
+        if (await send({ clear: true })) setNotice(t('keyCleared'))
+      }
+
+      const startEditing = () => {
+        setEditing(true)
+        setDraft('')
+        setError(undefined)
+        setNotice(undefined)
+      }
+
       return h('div', {
-        style: {
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          padding: '16px 0',
-          borderBottom: '0.5px solid var(--dsw-alias-border-l2)',
-        },
+        style: { padding: '16px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
       },
-      h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4, paddingRight: 24 } },
-        h('div', { style: TEXT.title }, t('title')),
-        h('div', { style: TEXT.detail, title: view.detail }, view.detail)),
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flex: 'none' } },
-        h('span', {
-          style: {
-            ...TEXT.value,
-            color: view.healthy ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)',
-          },
-        }, pending ? '…' : view.value),
-        h('button', {
-          type: 'button',
-          style: { ...TEXT.refresh, opacity: pending ? 0.5 : 1 },
-          title: t('refresh'),
-          'aria-label': t('refresh'),
-          disabled: pending,
-          onClick: () => { void bal.refresh() },
-          onMouseEnter: event => { event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)' },
-          onMouseLeave: event => { event.currentTarget.style.background = 'transparent' },
-        }, '↻')))
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4, paddingRight: 24 } },
+          h('div', { style: TEXT.title }, t('title')),
+          h('div', { style: TEXT.detail, title: view.detail }, view.detail)),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flex: 'none' } },
+          h('span', {
+            style: {
+              ...TEXT.value,
+              color: view.healthy ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)',
+            },
+          }, pending && data === undefined ? '…' : view.value),
+          h('button', {
+            type: 'button',
+            style: { ...TEXT.refresh, opacity: pending ? 0.5 : 1 },
+            title: t('refresh'),
+            'aria-label': t('refresh'),
+            disabled: pending,
+            onClick: () => { void bal.refresh() },
+            onMouseEnter: event => { event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)' },
+            onMouseLeave: event => { event.currentTarget.style.background = 'transparent' },
+          }, '↻'))),
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginTop: 6, flexWrap: 'wrap' } },
+        h(ActionLink, { label: configured ? t('changeKey') : t('setKey'), onClick: startEditing, disabled: busy || editing }),
+        configured ? h(ActionLink, { label: confirmClear ? t('confirmClear') : t('clearKey'), onClick: clear, disabled: busy }) : null,
+        configured && typeof data.keyTail === 'string' && data.keyTail !== ''
+          ? h('span', { style: { ...TEXT.detail, flex: 'none' } }, t('keyTailLabel', { tail: data.keyTail }))
+          : null,
+        notice !== undefined ? h('span', { style: { ...TEXT.detail, color: 'var(--dsw-alias-label-secondary)', flex: 'none' } }, notice) : null,
+        busyNote !== undefined ? h('span', { style: { ...TEXT.detail, flex: 'none' } }, busyNote) : null,
+        configured && data.source !== 'file'
+          ? h('span', { style: { ...TEXT.detail, flex: 'none' } },
+            t('sourceWarning', { source: data.source === 'config' ? t('sourceConfig') : t('sourceEnv') }))
+          : null),
+      error !== undefined
+        ? h('div', { style: { ...TEXT.detail, color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'normal', marginTop: 6 } }, error)
+        : null,
+      editing
+        ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+          h('input', {
+            type: 'password',
+            value: draft,
+            placeholder: t('keyPlaceholder'),
+            autoComplete: 'off',
+            spellCheck: false,
+            style: TEXT.input,
+            onChange: event => { setDraft(event.target.value) },
+            onKeyDown: event => {
+              if (event.key === 'Enter') void save()
+              if (event.key === 'Escape') { setEditing(false); setDraft(''); setError(undefined) }
+            },
+          }),
+          h('button', {
+            type: 'button',
+            style: {
+              ...TEXT.input,
+              flex: 'none',
+              width: 'auto',
+              padding: '0 14px',
+              background: 'var(--dsw-alias-bg-module-platform)',
+              cursor: 'pointer',
+            },
+            disabled: busy,
+            onClick: () => { void save() },
+          }, busy ? t('saving') : t('save')),
+          h(ActionLink, {
+            label: t('cancel'),
+            disabled: busy,
+            onClick: () => { setEditing(false); setDraft(''); setError(undefined) },
+          }),
+          h('div', { style: TEXT.hint }, t('keyHint', { path: keyFile })))
+        : null)
     }
 
     /**
@@ -266,7 +457,7 @@ window.__ModuleLoader__.load({
       const view = describe(state, t)
       const wallet = primaryWallet(state.data)
       const label = wide
-        ? (state.data?.ok === true ? view.value : view.value)
+        ? view.value
         : (wallet === undefined ? '¥' : (SYMBOLS[wallet.currency] ?? '¥'))
       const tooltip = `${t('title')} · ${view.value} — ${view.detail}`
       return h('button', {
@@ -299,6 +490,7 @@ window.__ModuleLoader__.load({
           get: store.get,
           subscribe: store.subscribe,
           refresh: store.refresh,
+          replace: store.replace,
         }
         ctx.effect(() => {
           void store.refresh()

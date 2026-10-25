@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-balance",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "DeepSeek API 账户余额：侧边栏余额胶囊 + 设置行，Host 侧读取 /user/balance。",
+  "description": "DeepSeek API 账户余额：侧边栏余额胶囊 + 设置行，支持在界面上设置/更换/清除 key。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
