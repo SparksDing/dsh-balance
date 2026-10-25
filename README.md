@@ -34,6 +34,8 @@
 
 HMR 打开时保存文件即生效；没开 HMR 则重启 `dsh web`。
 
+一个实测到的坑：只改文件内容、保持同一个模块路径时，运行中的 Host 不会重新导入（Node 的 ESM 缓存按 URL 复用），热替换只有在**模块 specifier 变化**时才真正生效。所以本地迭代可以像本仓库作者那样把 Host 入口放到版本化子目录（如 `./dsh-balance/0.3.0/index.js`）并改那一行，或者干脆重启一次 `dsh web`。
+
 **当 bundle 装**：本目录本身就是一个 bundle（`package.json` 里有 `dsh.bundle` 和 `dsh.client`），用 Creator 模式 / 侧边栏 Plugins 页的 `install_bundle` 指向这个绝对目录即可，之后随 profile 一起持久化。
 
 配置项都写在那一行的 `config:` 下，都是可选的：
