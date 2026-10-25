@@ -288,6 +288,7 @@ const SYSMON = '/api/deepseek-balance/sysmon'
 // ── Spend accounting ─────────────────────────────────────────────────────────
 
 const near = (left, right, tolerance = 1e-9) => Math.abs(left - right) <= tolerance
+const dayKeyOf = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 
 {
   const peak = new Date(Date.UTC(2026, 9, 26, 2, 0)) // Monday 02:00 UTC
@@ -327,6 +328,18 @@ const near = (left, right, tolerance = 1e-9) => Math.abs(left - right) <= tolera
     first.byModel.length === 2 && first.byModel.some(row => row.model === 'deepseek-flash')
       && first.byModel.some(row => row.model === 'deepseek-v4-pro'), JSON.stringify(first.byModel))
   check('the tracker converts to CNY', near(first.totals.cny, Math.round(first.totals.usd * 7 * 100) / 100), String(first.totals.cny))
+  tracker.label('s1', '修复余额插件的颜色\n顺便加个花费面板')
+  const withSession = tracker.snapshot()
+  check('the tracker buckets spend per session',
+    withSession.bySession.length === 2 && withSession.totals.sessions === 2,
+    JSON.stringify(withSession.bySession.map(row => row.id)))
+  check('a session is labelled by its first prompt',
+    withSession.bySession.find(row => row.id === 's1')?.label === '修复余额插件的颜色 顺便加个花费面板',
+    JSON.stringify(withSession.bySession.map(row => row.label)))
+  check('sessions are ordered by spend',
+    withSession.bySession[0].usd >= withSession.bySession[1].usd,
+    JSON.stringify(withSession.bySession.map(row => row.usd)))
+
   check('the tracker reports the cache hit share',
     first.totals.cacheHitPct === Math.round((100 * 850_000) / 1_100_000), String(first.totals.cacheHitPct))
   check('a usage-less event is not a call', first.totals.calls === 2)
@@ -337,10 +350,22 @@ const near = (left, right, tolerance = 1e-9) => Math.abs(left - right) <= tolera
   const exported = tracker.exportState()
   check('the exported ledger is serializable JSON',
     JSON.parse(JSON.stringify(exported)).days.length === 1, JSON.stringify(exported).slice(0, 160))
+  check('the exported ledger keeps sessions',
+    Array.isArray(exported.sessions) && exported.sessions.length === 2, JSON.stringify(exported.sessions).slice(0, 120))
 
   const revived = usage.createUsageTracker({ now: () => clock, usdToCny: 7 })
   revived.hydrate(JSON.parse(JSON.stringify(exported)))
   const revivedSnapshot = revived.snapshot()
+  check('hydrating a ledger restores the session rows',
+    revivedSnapshot.bySession.length === 2
+      && revivedSnapshot.bySession.find(row => row.id === 's1')?.label === '修复余额插件的颜色 顺便加个花费面板',
+    JSON.stringify(revivedSnapshot.bySession.map(row => [row.id, row.label])))
+  check('a version-1 ledger without sessions still loads',
+    (() => {
+      const legacy = usage.createUsageTracker({ now: () => clock, usdToCny: 7 })
+      legacy.hydrate({ version: 1, days: [[dayKeyOf(clock), { usd: 0.5, calls: 2, cacheRead: 10, miss: 0, output: 1, byModel: [] }]] })
+      return legacy.snapshot().totals.calls === 2 && legacy.snapshot().bySession.length === 0
+    })())
   check('hydrating a ledger restores the day totals',
     revivedSnapshot.totals.calls === 2 && near(revivedSnapshot.totals.usd, first.totals.usd, 1e-9),
     JSON.stringify(revivedSnapshot.totals))
@@ -417,6 +442,7 @@ const near = (left, right, tolerance = 1e-9) => Math.abs(left - right) <= tolera
   check('usage registers one GET route',
     registered.length === 1 && JSON.stringify(registered[0].methods) === '["GET"]', JSON.stringify(registered.map(r => r.path)))
   check('usage subscribes to session events', handlers.length === 1)
+  handlers[0]({ id: 's1' }, { type: 'user/message', data: { message: { content: [{ type: 'text', text: '帮我看下这个磁盘占用' }] } } })
   handlers[0]({ id: 's1' }, { type: 'request/context', data: { model: 'deepseek-flash' } })
   handlers[0]({ id: 's1' }, { type: 'assistant/message', time: Date.UTC(2026, 9, 26, 12, 0), data: { usage: { inputTokens: 1_000_000, cacheReadTokens: 850_000, outputTokens: 60_000 } } })
   handlers[0]({ id: 's1' }, { type: 'assistant/message', time: Date.UTC(2026, 9, 26, 12, 0), data: {} })
@@ -424,6 +450,26 @@ const near = (left, right, tolerance = 1e-9) => Math.abs(left - right) <= tolera
   check('the usage route prices the observed attempt',
     body.ok === true && body.totals.calls === 1 && near(body.totals.usd, 0.0611, 1e-4), JSON.stringify(body.totals))
   check('the usage route names the model', body.byModel[0]?.model === 'deepseek-flash', JSON.stringify(body.byModel))
+  check('the usage route names the session from its first prompt',
+    body.bySession[0]?.label === '帮我看下这个磁盘占用', JSON.stringify(body.bySession))
+
+  const retro = []
+  const retroHandlers = []
+  usage.registerUsage({ effect: fn => { fn(); return () => {} }, on: (name, handler) => { retroHandlers.push(handler); return () => {} }, connection: { fetch: { register(route) { retro.push(route); return () => {} } } } }, { path: '/api/retro' })
+  const oldSession = {
+    id: 's-old',
+    requestContext: () => ({ model: 'deepseek-v4-pro' }),
+    snapshotEvents: () => [
+      { type: 'turn/start', data: {} },
+      { type: 'user/message', data: { message: { content: [{ type: 'text', text: '把侧边栏胶囊改成两行' }] } } },
+    ],
+  }
+  retroHandlers[0](oldSession, { type: 'assistant/message', time: Date.now(), data: { usage: { inputTokens: 1000, outputTokens: 100 } } })
+  const retroBody = await (await retro[0].fetch(new Request('http://local/api/retro'))).json()
+  check('a session loaded before the plugin gets its first prompt as a label',
+    retroBody.bySession[0]?.label === '把侧边栏胶囊改成两行', JSON.stringify(retroBody.bySession))
+  check('a session\'s own route context supplies the model',
+    retroBody.byModel[0]?.model === 'deepseek-v4-pro', JSON.stringify(retroBody.byModel))
 
   const late = []
   const lateHandlers = []

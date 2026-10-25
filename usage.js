@@ -1,7 +1,8 @@
 /**
  * Spend accounting for the status panel: fold every provider-reported
- * `assistant/message` usage record into per-day, per-model cost estimates
- * priced with the DeepSeek rate card (including its peak/off-peak rule).
+ * `assistant/message` usage record into per-day, per-model, and per-session
+ * cost estimates priced with the DeepSeek rate card (including its
+ * peak/off-peak rule).
  *
  * The tracker itself is pure; `spend-store.js` owns durability, so a restart
  * resumes today's figure and the recent-day history. Everything is injectable
@@ -116,7 +117,8 @@ export function createUsageTracker(options = {}) {
   const startedAt = now().getTime()
   const days = new Map()
   const listeners = new Set()
-  const sessions = new Set()
+  /** Per-session totals across the retained window, labelled by first prompt. */
+  const sessions = new Map()
 
   /** Keep only the newest `historyDays` buckets. */
   const prune = () => {
@@ -154,6 +156,31 @@ export function createUsageTracker(options = {}) {
     bucket.byModel.set(model, row)
   }
 
+  /** Drop sessions that have not been seen inside the retained window. */
+  const pruneSessions = () => {
+    const cutoff = now().getTime() - historyDays * 24 * 60 * 60 * 1000
+    for (const [id, entry] of sessions) {
+      if (entry.lastAt < cutoff) sessions.delete(id)
+    }
+  }
+
+  /**
+   * Remember the first prompt of a session, so the panel can name it.
+   * @param sessionId - session identity.
+   * @param text - prompt text, already trimmed; ignored when empty.
+   */
+  const label = (sessionId, text) => {
+    if (typeof sessionId !== 'string' || sessionId === '') return
+    const cleaned = String(text ?? '').replace(/\s+/g, ' ').trim()
+    if (cleaned === '') return
+    const entry = sessions.get(sessionId)
+    if (entry === undefined) {
+      sessions.set(sessionId, { ...emptyRow(), label: cleaned.slice(0, 80), firstAt: now().getTime(), lastAt: 0, lastDay: dayKey(now()) })
+      return
+    }
+    if (entry.label === '') entry.label = cleaned.slice(0, 80)
+  }
+
   /**
    * Record one provider-reported attempt.
    * @param entry - `model`, `usage`, `sessionId`, and the event time.
@@ -164,7 +191,20 @@ export function createUsageTracker(options = {}) {
     if (priced.miss + priced.cacheRead + priced.cacheWrite + priced.output === 0) return
     const model = entry.model === undefined || entry.model === '' ? 'unknown' : entry.model
     addTo(bucketOf(dayKey(at)), model, priced)
-    if (entry.sessionId !== undefined) sessions.add(entry.sessionId)
+    if (typeof entry.sessionId === 'string' && entry.sessionId !== '') {
+      const row = sessions.get(entry.sessionId)
+        ?? { ...emptyRow(), label: '', firstAt: at.getTime(), lastAt: 0, lastDay: dayKey(at) }
+      row.usd += priced.usd
+      row.calls += 1
+      row.cacheRead += priced.cacheRead
+      row.cacheWrite += priced.cacheWrite
+      row.miss += priced.miss
+      row.output += priced.output
+      row.lastAt = at.getTime()
+      row.lastDay = dayKey(at)
+      sessions.set(entry.sessionId, row)
+    }
+    pruneSessions()
     prune()
     for (const listener of listeners) {
       try {
@@ -203,6 +243,24 @@ export function createUsageTracker(options = {}) {
         bucket.byModel.set(model, target)
       }
     }
+    for (const pair of Array.isArray(state.sessions) ? state.sessions : []) {
+      if (!Array.isArray(pair) || pair.length !== 2) continue
+      const [id, raw] = pair
+      if (typeof id !== 'string' || raw === null || typeof raw !== 'object') continue
+      const row = sessions.get(id) ?? { ...emptyRow(), label: '', firstAt: 0, lastAt: 0, lastDay: '' }
+      for (const key of FIELDS) {
+        const value = Number(raw[key])
+        if (Number.isFinite(value) && value > 0) row[key] += value
+      }
+      if (typeof raw.label === 'string' && raw.label !== '' && row.label === '') row.label = raw.label
+      const firstAt = Number(raw.firstAt)
+      if (Number.isFinite(firstAt) && firstAt > 0 && (row.firstAt === 0 || firstAt < row.firstAt)) row.firstAt = firstAt
+      const lastAt = Number(raw.lastAt)
+      if (Number.isFinite(lastAt) && lastAt > row.lastAt) row.lastAt = lastAt
+      if (typeof raw.lastDay === 'string' && raw.lastDay !== '') row.lastDay = raw.lastDay
+      sessions.set(id, row)
+    }
+    pruneSessions()
     prune()
   }
 
@@ -210,7 +268,7 @@ export function createUsageTracker(options = {}) {
   const exportState = () => {
     prune()
     return {
-      version: 1,
+      version: 2,
       days: [...days.entries()]
         .sort(([left], [right]) => (left < right ? 1 : left > right ? -1 : 0))
         .map(([day, bucket]) => [day, {
@@ -229,6 +287,18 @@ export function createUsageTracker(options = {}) {
             output: row.output,
           }]),
         }]),
+      sessions: [...sessions.entries()].map(([id, row]) => [id, {
+        label: row.label,
+        usd: row.usd,
+        calls: row.calls,
+        cacheRead: row.cacheRead,
+        cacheWrite: row.cacheWrite,
+        miss: row.miss,
+        output: row.output,
+        firstAt: row.firstAt,
+        lastAt: row.lastAt,
+        lastDay: row.lastDay,
+      }]),
     }
   }
 
@@ -246,6 +316,21 @@ export function createUsageTracker(options = {}) {
         cny: Math.round(entry.usd * usdToCny * 100) / 100,
         calls: entry.calls,
       }))
+    const bySession = [...sessions.entries()]
+      .map(([id, row]) => ({
+        id,
+        label: row.label,
+        usd: Math.round(row.usd * 10000) / 10000,
+        cny: Math.round(row.usd * usdToCny * 100) / 100,
+        calls: row.calls,
+        lastAt: row.lastAt,
+        lastDay: row.lastDay,
+        cacheReadText: formatBytes(row.cacheRead),
+        missText: formatBytes(row.miss),
+        outputText: formatBytes(row.output),
+      }))
+      .sort((left, right) => right.usd - left.usd)
+    const todaySessions = bySession.filter(row => row.lastDay === today).length
     return {
       ok: true,
       day: today,
@@ -256,7 +341,7 @@ export function createUsageTracker(options = {}) {
         usd: Math.round(bucket.usd * 10000) / 10000,
         cny: Math.round(bucket.usd * usdToCny * 100) / 100,
         calls: bucket.calls,
-        sessions: sessions.size,
+        sessions: todaySessions,
         cacheRead: bucket.cacheRead,
         cacheWrite: bucket.cacheWrite,
         miss: bucket.miss,
@@ -277,11 +362,13 @@ export function createUsageTracker(options = {}) {
       })).sort((left, right) => right.usd - left.usd),
       recent,
       recentCny: Math.round(recent.reduce((sum, entry) => sum + entry.usd, 0) * usdToCny * 100) / 100,
+      bySession: bySession.slice(0, 10),
     }
   }
 
   return {
     record,
+    label,
     snapshot,
     hydrate,
     exportState,
@@ -306,7 +393,47 @@ export function registerUsage(ctx, options = {}) {
   /** Latest model per session, learned from route metadata events. */
   const models = new Map()
 
+  /** First text block of one user message, trimmed for a session label. */
+  const promptText = (blocks) => {
+    if (!Array.isArray(blocks)) return ''
+    return blocks
+      .filter(block => block !== null && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+      .map(block => block.text)
+      .join(' ')
+  }
+
+  /** Sessions whose label is already known, so the log is scanned at most once. */
+  const labelled = new Set()
+
+  /**
+   * Read a session's first prompt out of its log, for sessions that started
+   * before this plugin was loaded.
+   * @param session - session object from the event bus.
+   * @returns the prompt text, or an empty string when unavailable.
+   */
+  const firstPrompt = (session) => {
+    if (typeof session?.snapshotEvents !== 'function') return ''
+    try {
+      for (const event of session.snapshotEvents()) {
+        if (event.type !== 'user/message') continue
+        const text = promptText(event.data?.message?.content)
+        if (text !== '') return text
+      }
+    } catch {
+      // A session that cannot be replayed simply stays unnamed.
+    }
+    return ''
+  }
+
   ctx.effect(() => ctx.on('session/event', (session, event) => {
+    if (event.type === 'user/message') {
+      const text = promptText(event.data?.message?.content)
+      if (text !== '') {
+        tracker.label?.(session.id, text)
+        labelled.add(session.id)
+      }
+      return
+    }
     if (event.type === 'request/context') {
       models.set(session.id, event.data.model)
       return
@@ -317,8 +444,18 @@ export function registerUsage(ctx, options = {}) {
       return
     }
     if (event.type !== 'assistant/message' || event.data.usage === undefined) return
+    if (!labelled.has(session.id)) {
+      const text = firstPrompt(session)
+      if (text !== '') {
+        tracker.label?.(session.id, text)
+        labelled.add(session.id)
+      }
+    }
+    const known = models.get(session.id)
+      ?? session.requestContext?.()?.model
+      ?? session.requestHeader?.()?.config?.model
     tracker.record({
-      model: models.get(session.id) ?? defaultModel,
+      model: known ?? defaultModel,
       usage: event.data.usage,
       sessionId: session.id,
       time: event.time,

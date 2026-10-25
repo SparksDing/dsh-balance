@@ -82,6 +82,8 @@ window.__ModuleLoader__.load({
       spendModel: '{model}  命中 {hit} · 未命中 {miss} · 输出 {out}  {cny}',
       spendRecent: '近 7 天 {cny}',
       spendDay: '{day}  {cny}  {n} 次',
+      spendSessionRow: '{label}  {cny}  {n} 次',
+      spendUnnamed: '（未命名会话）',
     }
 
     const en = {
@@ -140,6 +142,8 @@ window.__ModuleLoader__.load({
       spendModel: '{model}  hit {hit} · miss {miss} · out {out}  {cny}',
       spendRecent: 'last 7 days {cny}',
       spendDay: '{day}  {cny}  {n} calls',
+      spendSessionRow: '{label}  {cny}  {n} calls',
+      spendUnnamed: '(untitled session)',
     }
 
     /**
@@ -740,6 +744,7 @@ window.__ModuleLoader__.load({
         lines.push(window.join(' · '))
       }
       const recent = healthy && Array.isArray(data.recent) ? data.recent : []
+      const bySession = healthy && Array.isArray(data.bySession) ? data.bySession : []
       const details = open && healthy && totals.calls > 0
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 } },
           ...byModel.map(row => h('div', {
@@ -753,6 +758,18 @@ window.__ModuleLoader__.load({
             out: row.outputText,
             cny: `¥${row.cny.toFixed(2)}`,
           }))),
+          bySession.length === 0
+            ? null
+            : h('div', { style: { borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: 6, display: 'flex', flexDirection: 'column', gap: 4 } },
+              ...bySession.map(row => h('div', {
+                key: row.id,
+                style: { ...TEXT.detail, whiteSpace: 'normal', fontVariantNumeric: 'tabular-nums' },
+                title: `${row.id} · ${new Date(row.lastAt).toLocaleString()}`,
+              }, t('spendSessionRow', {
+                label: row.label === '' ? t('spendUnnamed') : row.label,
+                cny: `¥${row.cny.toFixed(2)}`,
+                n: row.calls,
+              })))),
           recent.length < 2
             ? null
             : h('div', { style: { borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: 6, display: 'flex', flexDirection: 'column', gap: 4 } },
