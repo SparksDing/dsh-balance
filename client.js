@@ -20,6 +20,7 @@ window.__ModuleLoader__.load({
     const ROUTE = '/api/deepseek-balance/state'
     const KEY_ROUTE = '/api/deepseek-balance/key'
     const SYSMON_ROUTE = '/api/deepseek-balance/sysmon'
+    const USAGE_ROUTE = '/api/deepseek-balance/usage'
     /** Background refresh cadence while the page is open. */
     const POLL_MS = 30_000
     /** Currency symbols for the wallets DeepSeek reports. */
@@ -71,6 +72,15 @@ window.__ModuleLoader__.load({
       sysNetShort: '网络↓',
       sysTrendEmpty: '采样点还不够画趋势',
       sysPill: 'CPU {cpu}% · 磁盘 {disk}%',
+      spendTitle: '消耗',
+      spendToday: '今日 {cny}',
+      spendSince: '自启动 {cny}',
+      spendHit: '缓存命中 {pct}%',
+      spendPeak: '高峰（双倍计价）',
+      spendOffPeak: '平峰（半价）',
+      spendCalls: '{n} 次调用 · {n2} 个会话',
+      spendEmpty: '还没有用量记录（自本次启动起统计）',
+      spendModel: '{model}  命中 {hit} · 未命中 {miss} · 输出 {out}  {cny}',
     }
 
     const en = {
@@ -119,6 +129,15 @@ window.__ModuleLoader__.load({
       sysNetShort: 'Net ↓',
       sysTrendEmpty: 'Not enough samples for a trend yet',
       sysPill: 'CPU {cpu}% · disk {disk}%',
+      spendTitle: 'Spend',
+      spendToday: 'today {cny}',
+      spendSince: 'since start {cny}',
+      spendHit: 'cache hit {pct}%',
+      spendPeak: 'Peak hours (×2)',
+      spendOffPeak: 'Off-peak (½ price)',
+      spendCalls: '{n} calls · {n2} sessions',
+      spendEmpty: 'No usage recorded yet (counted since this start)',
+      spendModel: '{model}  hit {hit} · miss {miss} · out {out}  {cny}',
     }
 
     /**
@@ -683,6 +702,89 @@ window.__ModuleLoader__.load({
       details)
     }
 
+
+    /**
+     * Settings → General row for the money spent, folded from provider usage.
+     * @param props - composed slot props (locale seat plus the injected store).
+     * @returns the row element tree.
+     */
+    function SpendRow({ t, spend }) {
+      const state = useStoreState(spend)
+      const [open, setOpen] = React.useState(false)
+      const data = state.data
+      const pending = state.phase === 'loading'
+      const healthy = data !== undefined && data.ok === true
+      const totals = healthy ? data.totals : undefined
+      const byModel = healthy && Array.isArray(data.byModel) ? data.byModel : []
+      const lines = []
+      if (data === undefined) {
+        lines.push(state.phase === 'error'
+          ? t('failed', { message: state.transportError ?? 'route' })
+          : t('loading'))
+      } else if (!healthy) {
+        lines.push(t('sysUnavailable'))
+      } else if (totals.calls === 0) {
+        lines.push(t('spendEmpty'))
+      } else {
+        const parts = [
+          t('spendToday', { cny: `¥${totals.cny.toFixed(2)}` }),
+          t('spendSince', { cny: `¥${(totals.cny).toFixed(2)}` }),
+        ]
+        if (totals.cacheHitPct !== null) parts.push(t('spendHit', { pct: totals.cacheHitPct }))
+        lines.push(parts.join(' · '))
+        lines.push([
+          data.peak ? t('spendPeak') : t('spendOffPeak'),
+          t('spendCalls', { n: totals.calls, n2: totals.sessions }),
+        ].join(' · '))
+      }
+      const details = open && healthy && totals.calls > 0
+        ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 } },
+          ...byModel.map(row => h('div', {
+            key: row.model,
+            style: { ...TEXT.detail, whiteSpace: 'normal', fontVariantNumeric: 'tabular-nums' },
+            title: row.model,
+          }, t('spendModel', {
+            model: row.model,
+            hit: row.cacheReadText,
+            miss: row.missText,
+            out: row.outputText,
+            cny: `¥${row.cny.toFixed(2)}`,
+          }))))
+        : null
+      return h('div', {
+        style: { padding: '16px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
+      },
+      h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 8 } },
+        h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4, paddingRight: 24 } },
+          h('div', { style: TEXT.title }, t('spendTitle')),
+          ...lines.map((line, index) => h('div', {
+            key: String(index),
+            style: { ...TEXT.detail, whiteSpace: 'normal' },
+            title: line,
+          }, line)),
+          healthy && totals.calls > 0
+            ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginTop: 2 } },
+              h(ActionLink, {
+                label: open ? t('sysCollapse') : t('sysDetails'),
+                onClick: () => { setOpen(value => !value) },
+              }))
+            : null),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flex: 'none' } },
+          h('span', { style: { ...TEXT.value, color: 'var(--dsw-alias-label-tertiary)' } },
+            totals === undefined || totals.calls === 0 ? '—' : `¥${totals.cny.toFixed(2)}`),
+          h('button', {
+            type: 'button',
+            style: { ...TEXT.refresh, opacity: pending ? 0.5 : 1 },
+            title: t('refresh'),
+            'aria-label': t('refresh'),
+            disabled: pending,
+            onClick: () => { void spend.refresh() },
+            onMouseEnter: event => { event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)' },
+            onMouseLeave: event => { event.currentTarget.style.background = 'transparent' },
+          }, '↻'))),
+      details)
+    }
+
     /**
      * Sidebar footer pill for CPU usage; hidden on the collapsed rail, where the
      * balance symbol already owns the tight space.
@@ -796,6 +898,38 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => ({ sys }),
         }, SysmonPill))
+        const usageStore = createStore(async () => {
+          const response = await fetch(USAGE_ROUTE, {
+            headers: { accept: 'application/json' },
+            cache: 'no-store',
+          })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          return response.json()
+        })
+        const spend = {
+          get: usageStore.get,
+          subscribe: usageStore.subscribe,
+          refresh: usageStore.refresh,
+        }
+        ctx.effect(() => {
+          void usageStore.refresh()
+          const timer = setInterval(() => { void usageStore.refresh() }, 30_000)
+          const onVisibility = () => {
+            if (document.visibilityState === 'visible') void usageStore.refresh()
+          }
+          document.addEventListener('visibilitychange', onVisibility)
+          return () => {
+            clearInterval(timer)
+            document.removeEventListener('visibilitychange', onVisibility)
+          }
+        }, 'dsh-balance: usage polling')
+        ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+          name: 'settings.general.item',
+          id: 'deepseek-spend',
+          order: 25,
+          locale: NS,
+          inject: () => ({ spend }),
+        }, SpendRow))
       },
     }
   },

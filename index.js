@@ -16,6 +16,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { json } from './http.js'
 import { registerSysmon } from './sysmon.js'
+import { registerUsage } from './usage.js'
 
 /** Stable Cordis plugin name; the Client module registers under the package name. */
 export const name = '@local/dsh-balance'
@@ -31,10 +32,12 @@ const STATE_PATH = '/api/deepseek-balance/state'
 const KEY_PATH = '/api/deepseek-balance/key'
 /** Authenticated system-status route (CPU, disk, load). */
 const SYSMON_PATH = '/api/deepseek-balance/sysmon'
+/** Authenticated spend route (token usage folded into money). */
+const USAGE_PATH = '/api/deepseek-balance/usage'
 /** Unauthenticated liveness probe naming this plugin and nothing else. */
 const PING_PATH = '/dsh-balance/ping'
 /** Plugin version reported by the ping, so a running Host's loaded build is visible. */
-const VERSION = '0.4.1'
+const VERSION = '0.5.0'
 /** Key file used when neither config nor environment supplies one. */
 const DEFAULT_KEY_FILE = join(homedir(), '.config', 'deepseek', 'api_key')
 /** DeepSeek answers 401 for a missing, deleted, or mistyped key. */
@@ -291,7 +294,13 @@ export function apply(ctx, raw = {}) {
     intervalMs: Number(config.sysmonIntervalMs) > 0 ? Number(config.sysmonIntervalMs) : 3_000,
   })
 
-  const routes = [STATE_PATH, KEY_PATH, sysmonPath]
+  const usagePath = registerUsage(ctx, {
+    path: USAGE_PATH,
+    usdToCny: config.usdToCny,
+    prices: config.prices,
+  })
+
+  const routes = [STATE_PATH, KEY_PATH, sysmonPath, usagePath]
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -302,6 +311,6 @@ export function apply(ctx, raw = {}) {
     },
   }), 'dsh-balance: ping route')
 
-  ctx.logger?.info?.('[dsh-balance] routes ready: %s -> %s/user/balance, sysmon at %s',
-    routes.join(', '), apiBase, SYSMON_PATH)
+  ctx.logger?.info?.('[dsh-balance] routes ready: %s -> %s/user/balance',
+    routes.join(', '), apiBase)
 }

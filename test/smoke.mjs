@@ -53,6 +53,7 @@ const apiBase = `http://127.0.0.1:${server.address().port}`
 
 const host = await import(pathToFileURL(join(root, 'index.js')).href)
 const sysmon = await import(pathToFileURL(join(root, 'sysmon.js')).href)
+const usage = await import(pathToFileURL(join(root, 'usage.js')).href)
 check('host exports the package name', host.name === '@local/dsh-balance', host.name)
 check('host injects connection and webServer', JSON.stringify(host.inject) === '["connection","webServer"]')
 
@@ -65,6 +66,7 @@ function hostContext() {
     webRoutes,
     ctx: {
       effect(fn) { fn(); return () => {} },
+      on() { return () => {} },
       connection: { fetch: { register(route) { routes.set(route.path, route); return () => {} } } },
       webServer: { register(route) { webRoutes.push(route); return () => {} } },
       logger: { info() {} },
@@ -282,6 +284,78 @@ const SYSMON = '/api/deepseek-balance/sysmon'
   check('a sampling failure is reported, not thrown', body.ok === false && body.error.code === 'sampling-failed', JSON.stringify(body))
 }
 
+// ── Spend accounting ─────────────────────────────────────────────────────────
+
+const near = (left, right, tolerance = 1e-9) => Math.abs(left - right) <= tolerance
+
+{
+  const peak = new Date(Date.UTC(2026, 9, 26, 2, 0)) // Monday 02:00 UTC
+  const offPeak = new Date(Date.UTC(2026, 9, 26, 12, 0)) // Monday 12:00 UTC
+  const weekend = new Date(Date.UTC(2026, 9, 25, 2, 0)) // Sunday 02:00 UTC
+  check('peak windows follow the published hours',
+    usage.isPeak(peak) === true && usage.isPeak(offPeak) === false && usage.isPeak(weekend) === false,
+    `${usage.isPeak(peak)} ${usage.isPeak(offPeak)} ${usage.isPeak(weekend)}`)
+  check('the pro card is selected by model name',
+    usage.priceFor('deepseek-v4-pro').output === 1.98 && usage.priceFor('deepseek-flash').output === 0.6)
+  check('an unknown model falls back to the flash card', usage.priceFor(undefined).miss === 0.15)
+
+  const buckets = usage.bucketsOf({ inputTokens: 1_000_000, cacheReadTokens: 850_000, cacheWriteTokens: 0, outputTokens: 60_000 })
+  check('cache reads are removed from the miss bucket',
+    buckets.miss === 150_000 && buckets.cacheRead === 850_000, JSON.stringify(buckets))
+
+  const flash = usage.priceFor('deepseek-flash')
+  const offPeakCost = usage.costOf({ inputTokens: 1_000_000, cacheReadTokens: 850_000, outputTokens: 60_000 }, flash, false)
+  check('off-peak cost matches the rate card arithmetic',
+    near(offPeakCost.usd, 0.06105, 1e-9), String(offPeakCost.usd))
+  const peakCost = usage.costOf({ inputTokens: 1_000_000, cacheReadTokens: 850_000, outputTokens: 60_000 }, flash, true)
+  check('peak billing doubles every bucket', near(peakCost.usd, 0.1221, 1e-9), String(peakCost.usd))
+  const proCost = usage.costOf({ inputTokens: 1_000_000, cacheReadTokens: 850_000, outputTokens: 60_000 }, usage.priceFor('deepseek-v4-pro'), false)
+  check('the pro card costs about four times the flash card',
+    near(proCost.usd, 0.2365, 1e-9) && proCost.usd / offPeakCost.usd > 3.5, String(proCost.usd))
+}
+
+{
+  let clock = new Date(Date.UTC(2026, 9, 26, 12, 0))
+  const tracker = usage.createUsageTracker({ now: () => clock, usdToCny: 7 })
+  tracker.record({ model: 'deepseek-flash', sessionId: 's1', time: clock.getTime(), usage: { inputTokens: 1_000_000, cacheReadTokens: 850_000, outputTokens: 60_000 } })
+  tracker.record({ model: 'deepseek-v4-pro', sessionId: 's2', time: clock.getTime(), usage: { inputTokens: 100_000, cacheReadTokens: 0, outputTokens: 5_000 } })
+  tracker.record({ model: 'deepseek-flash', sessionId: 's1', time: clock.getTime(), usage: {} })
+  const first = tracker.snapshot()
+  check('the tracker folds every attempt', first.totals.calls === 2, JSON.stringify(first.totals))
+  check('the tracker prices per model',
+    first.byModel.length === 2 && first.byModel.some(row => row.model === 'deepseek-flash')
+      && first.byModel.some(row => row.model === 'deepseek-v4-pro'), JSON.stringify(first.byModel))
+  check('the tracker converts to CNY', near(first.totals.cny, Math.round(first.totals.usd * 7 * 100) / 100), String(first.totals.cny))
+  check('the tracker reports the cache hit share',
+    first.totals.cacheHitPct === Math.round((100 * 850_000) / 1_100_000), String(first.totals.cacheHitPct))
+  check('a usage-less event is not a call', first.totals.calls === 2)
+
+  clock = new Date(Date.UTC(2026, 9, 27, 12, 0))
+  const next = tracker.snapshot()
+  check('a new local day resets the totals', next.totals.calls === 0 && next.byModel.length === 0, JSON.stringify(next))
+}
+
+{
+  const registered = []
+  const handlers = []
+  const ctx = {
+    effect(fn) { fn(); return () => {} },
+    on(name, handler) { handlers.push(handler); return () => {} },
+    connection: { fetch: { register(route) { registered.push(route); return () => {} } } },
+  }
+  usage.registerUsage(ctx, { path: '/api/deepseek-balance/usage', now: () => new Date(Date.UTC(2026, 9, 26, 12, 0)) })
+  check('usage registers one GET route',
+    registered.length === 1 && JSON.stringify(registered[0].methods) === '["GET"]', JSON.stringify(registered.map(r => r.path)))
+  check('usage subscribes to session events', handlers.length === 1)
+  handlers[0]({ id: 's1' }, { type: 'request/context', data: { model: 'deepseek-flash' } })
+  handlers[0]({ id: 's1' }, { type: 'assistant/message', time: Date.UTC(2026, 9, 26, 12, 0), data: { usage: { inputTokens: 1_000_000, cacheReadTokens: 850_000, outputTokens: 60_000 } } })
+  handlers[0]({ id: 's1' }, { type: 'assistant/message', time: Date.UTC(2026, 9, 26, 12, 0), data: {} })
+  const body = await (await registered[0].fetch(new Request('http://local/api/deepseek-balance/usage'))).json()
+  check('the usage route prices the observed attempt',
+    body.ok === true && body.totals.calls === 1 && near(body.totals.usd, 0.0611, 1e-4), JSON.stringify(body.totals))
+  check('the usage route names the model', body.byModel[0]?.model === 'deepseek-flash', JSON.stringify(body.byModel))
+}
+
 // ── Key write route ──────────────────────────────────────────────────────────
 
 const sandbox = await mkdtemp(join(tmpdir(), 'dsh-balance-test-'))
@@ -380,13 +454,15 @@ const fakeCtx = {
   },
 }
 plugin.apply(fakeCtx)
-check('client registers four surfaces', registrations.length === 4, String(registrations.length))
+check('client registers five surfaces', registrations.length === 5, String(registrations.length))
 const rows = registrations.filter(r => r.options.name === 'settings.general.item')
 const pills = registrations.filter(r => r.options.name === 'sidebar.footer.action')
 const row = rows.find(r => r.options.id === 'deepseek-balance')
 const pill = pills.find(r => r.options.id === 'deepseek-balance')
 const sysRow = rows.find(r => r.options.id === 'system-status')
 const sysPill = pills.find(r => r.options.id === 'system-status')
+const spendRow = rows.find(r => r.options.id === 'deepseek-spend')
+check('spend row registered into settings.general.item', spendRow !== undefined)
 check('row registered into settings.general.item', row !== undefined)
 check('pill registered into sidebar.footer.action', pill !== undefined)
 check('system row registered into settings.general.item', sysRow !== undefined)
@@ -518,6 +594,30 @@ const sysmonData = {
     text.includes('sysPill{"cpu":"12.5","disk":"26"}'), text)
   const rail = sysPill.component({ t: translate, sys: storeState('ready', sysmonData), wide: false })
   check('system pill is hidden on the collapsed rail', rail === null)
+}
+
+{
+  const spendData = {
+    ok: true,
+    day: '2026-10-25',
+    peak: false,
+    usdToCny: 7.1,
+    totals: { usd: 0.0611, cny: 0.43, calls: 12, sessions: 2, cacheHitPct: 92, cacheReadText: '850K', missText: '150K', outputText: '60K' },
+    byModel: [
+      { model: 'deepseek-flash', calls: 10, usd: 0.05, cny: 0.36, cacheReadText: '800K', missText: '120K', outputText: '50K' },
+      { model: 'deepseek-v4-pro', calls: 2, usd: 0.01, cny: 0.07, cacheReadText: '50K', missText: '30K', outputText: '10K' },
+    ],
+  }
+  const text = textOf(spendRow.component({ t: translate, spend: storeState('ready', spendData) }))
+  check('spend row shows today and the cache hit share',
+    text.includes('spendToday{"cny":"¥0.43"}') && text.includes('spendHit{"pct":92}'), text)
+  check('spend row names the billing window', text.includes('spendOffPeak'), text)
+  check('spend row offers the details toggle', text.includes('sysDetails'), text)
+  check('spend row features the total on the right', text.includes('¥0.43'), text)
+
+  const emptyData = { ...spendData, totals: { ...spendData.totals, calls: 0, cny: 0 }, byModel: [] }
+  const empty = textOf(spendRow.component({ t: translate, spend: storeState('ready', emptyData) }))
+  check('spend row explains an empty ledger', empty.includes('spendEmpty'), empty)
 }
 
 {
