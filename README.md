@@ -5,7 +5,8 @@
 - **侧边栏底部胶囊**：常驻显示 `¥110.25`，点一下就刷新；侧边栏收起时只显示货币符号。
 - **设置 → 通用 → DeepSeek API 余额** 一行：金额、更新时间、赠送金额提示、刷新按钮；没配 key / key 失效 / 网络失败时直接在这一行说明原因。
 - **key 直接在界面上管**：点「设置 key」粘贴保存，保存前先用 `/user/balance` 校验一次，只有校验通过才写盘；已配置后可以「更换 key」或「清除」。不用 shell，key 也不经过浏览器之外的任何地方。
-- **设置 → 通用 → 系统状态** 一行：CPU 使用率、核数、负载，以及每个真实文件系统的已用/总量与百分比（`/`、`/boot/efi` 等，按容量倒序取前 8 个）。
+- **设置 → 通用 → 系统状态** 一行：CPU 使用率、核数、负载、内存，以及文件系统的已用/总量与百分比（`/`、`/boot/efi` 等，按容量倒序取前 8 个）。
+- 点这一行的「详情」展开：磁盘读/写速率、网络收/发速率、四张迷你趋势图（CPU、内存、磁盘写、网络收，各取最近 40 个采样点），以及全部挂载点的用量表。
 - **侧边栏底部胶囊**：余额旁边再挂一个 `CPU 12.5%`，鼠标悬停看磁盘使用率；侧边栏收起时这个胶囊自动隐藏，只留余额符号。
 - 余额每 30 秒、系统状态每 10 秒自动刷新；切回标签页时立即刷新一次。CPU 由 Host 每 3 秒读一次 `/proc/stat` 求差值。
 
@@ -14,7 +15,7 @@
 | 文件 | 作用 |
 |---|---|
 | `index.js` | Host 半边：注册 `/api/deepseek-balance/state`（GET，读余额）、`/api/deepseek-balance/key`（POST，存/清 key）、`/api/deepseek-balance/sysmon`（GET，CPU/磁盘/负载）和 `/dsh-balance/ping`（只回插件名、版本与路由表，无账户数据）。前三个走 Connection 的登录校验。 |
-| `sysmon.js` | 系统采样：解析 `/proc/stat` 求 CPU 占用、解析 `/proc/mounts` + `statfs` 求各挂载点用量、读取负载均值。纯函数 + 可注入依赖，便于离线测试。 |
+| `sysmon.js` | 系统采样：`/proc/stat` 求 CPU 占用、`/proc/meminfo` 求内存、`/proc/diskstats` 求磁盘读写速率、`/proc/net/dev` 求网络速率、`/proc/mounts` + `statfs` 求各挂载点用量，另加负载均值和 40 点趋势环形缓存。全是累计计数器求差 + 可注入依赖，便于离线测试。 |
 | `http.js` | 两个路由共用的 JSON 响应构造。 |
 | `client.js` | 浏览器半边：`window.__ModuleLoader__.load` 注册懒工厂，注入 `settings.general.item` 与 `sidebar.footer.action` 两个槽位。 |
 | `cordis.patch.yml` | 作为 bundle 安装时的默认补丁（`install_bundle` 用）。 |

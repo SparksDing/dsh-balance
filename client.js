@@ -61,6 +61,15 @@ window.__ModuleLoader__.load({
       sysLoad: '负载 {l1} {l5} {l15}',
       sysDisk: '{mount} {used} / {total}（已用 {pct}%）',
       sysUnavailable: '系统信息不可用',
+      sysMem: '内存 {used} / {total}（已用 {pct}%）',
+      sysIo: '磁盘读 {read} · 写 {write} · 网络 ↓{rx} ↑{tx}',
+      sysDetails: '详情',
+      sysCollapse: '收起',
+      sysCpuShort: 'CPU',
+      sysMemShort: '内存',
+      sysWriteShort: '磁盘写',
+      sysNetShort: '网络↓',
+      sysTrendEmpty: '采样点还不够画趋势',
     }
 
     const en = {
@@ -99,6 +108,15 @@ window.__ModuleLoader__.load({
       sysLoad: 'load {l1} {l5} {l15}',
       sysDisk: '{mount} {used} / {total} ({pct}% used)',
       sysUnavailable: 'System information unavailable',
+      sysMem: 'Memory {used} / {total} ({pct}% used)',
+      sysIo: 'Disk {read} read · {write} write · net ↓{rx} ↑{tx}',
+      sysDetails: 'Details',
+      sysCollapse: 'Hide',
+      sysCpuShort: 'CPU',
+      sysMemShort: 'Memory',
+      sysWriteShort: 'Disk write',
+      sysNetShort: 'Net ↓',
+      sysTrendEmpty: 'Not enough samples for a trend yet',
     }
 
     /**
@@ -502,19 +520,82 @@ window.__ModuleLoader__.load({
       return disks.find(disk => disk.mount === '/') ?? disks[0]
     }
 
+    /** Height of one sparkline, in SVG units. */
+    const CHART_HEIGHT = 28
+
     /**
-     * Settings → General row for CPU, load average, and disk usage.
+     * Project one series into an SVG polyline, oldest sample on the left.
+     * @param values - series, possibly containing nulls before the first delta.
+     * @param ceiling - fixed upper bound (percent charts), or undefined to scale.
+     * @returns the polyline `points`, empty when the series has no numbers.
+     */
+    function sparkPoints(values, ceiling) {
+      const clean = values.filter(value => typeof value === 'number' && Number.isFinite(value))
+      if (clean.length === 0) return ''
+      const max = ceiling ?? Math.max(...clean, 1)
+      const step = clean.length === 1 ? 0 : 100 / (clean.length - 1)
+      return clean.map((value, index) => {
+        const x = (index * step).toFixed(2)
+        const y = (CHART_HEIGHT - Math.min(1, value / (max || 1)) * CHART_HEIGHT).toFixed(2)
+        return `${x},${y}`
+      }).join(' ')
+    }
+
+    /**
+     * One labelled mini chart for a sampled series.
+     * @param props - label, current text, series, and optional fixed ceiling.
+     * @returns the chart element tree.
+     */
+    function MetricSpark({ label, value, values, ceiling }) {
+      const points = sparkPoints(values, ceiling)
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 } },
+        h('div', {
+          style: { display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12, lineHeight: '18px' },
+        },
+        h('span', { style: { color: 'var(--dsw-alias-label-tertiary)' } }, label),
+        h('span', {
+          style: {
+            color: 'var(--dsw-alias-label-primary)',
+            fontVariantNumeric: 'tabular-nums',
+            whiteSpace: 'nowrap',
+          },
+        }, value)),
+        points === ''
+          ? h('div', { style: { ...TEXT.hint, fontSize: 11 } }, '—')
+          : h('svg', {
+            viewBox: `0 0 100 ${CHART_HEIGHT}`,
+            preserveAspectRatio: 'none',
+            style: { display: 'block', width: '100%', height: CHART_HEIGHT },
+            'aria-hidden': true,
+          }, h('polyline', {
+            points,
+            fill: 'none',
+            stroke: 'var(--dsw-alias-state-business-primary)',
+            strokeWidth: 1.5,
+            vectorEffect: 'non-scaling-stroke',
+          })))
+    }
+
+    /**
+     * Settings → General row for CPU, memory, I/O, and disk usage, with an
+     * expandable table plus trend charts.
      * @param props - composed slot props (locale seat plus the injected store).
      * @returns the row element tree.
      */
     function SysmonRow({ t, sys }) {
       const state = useStoreState(sys)
+      const [open, setOpen] = React.useState(false)
       const data = state.data
       const pending = state.phase === 'loading'
       const healthy = data !== undefined && data.ok === true
       const cpu = healthy ? data.cpu : undefined
+      const memory = healthy ? data.memory : undefined
+      const io = healthy ? data.io : undefined
+      const net = healthy ? data.net : undefined
       const disks = healthy && Array.isArray(data.disks) ? data.disks : []
+      const history = healthy && Array.isArray(data.history) ? data.history : []
       const featured = primaryDisk(disks)
+      const series = (key) => history.map(entry => entry[key])
       const lines = []
       if (data === undefined) {
         lines.push(state.phase === 'error'
@@ -530,12 +611,43 @@ window.__ModuleLoader__.load({
           t('sysCores', { n: cpu?.cores ?? '—' }),
           t('sysLoad', { l1: cpu?.load1 ?? '—', l5: cpu?.load5 ?? '—', l15: cpu?.load15 ?? '—' }),
         ].join(' · '))
-        for (const disk of disks.slice(0, 3)) {
+        if (memory !== undefined) {
+          lines.push(t('sysMem', { used: memory.usedText, total: memory.totalText, pct: memory.usedPct }))
+        }
+        for (const disk of disks.slice(0, open ? disks.length : 1)) {
           lines.push(t('sysDisk', {
             mount: disk.mount, used: disk.usedText, total: disk.totalText, pct: disk.usedPct,
           }))
         }
       }
+      const details = open && healthy
+        ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 } },
+          h('div', { style: { ...TEXT.detail, whiteSpace: 'normal' } }, t('sysIo', {
+            read: io?.readText ?? '—',
+            write: io?.writeText ?? '—',
+            rx: net?.rxText ?? '—',
+            tx: net?.txText ?? '—',
+          })),
+          history.length < 2
+            ? h('div', { style: { ...TEXT.hint, flexBasis: 'auto' } }, t('sysTrendEmpty'))
+            : h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 16px' } },
+              h(MetricSpark, {
+                label: t('sysCpuShort'), ceiling: 100,
+                value: pctText(cpu?.usagePct), values: series('cpu'),
+              }),
+              h(MetricSpark, {
+                label: t('sysMemShort'), ceiling: 100,
+                value: pctText(memory?.usedPct), values: series('mem'),
+              }),
+              h(MetricSpark, {
+                label: t('sysWriteShort'),
+                value: io?.writeText ?? '—', values: series('write'),
+              }),
+              h(MetricSpark, {
+                label: t('sysNetShort'),
+                value: net?.rxText ?? '—', values: series('rx'),
+              })))
+        : null
       return h('div', {
         style: { padding: '16px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
       },
@@ -546,7 +658,13 @@ window.__ModuleLoader__.load({
             key: String(index),
             style: { ...TEXT.detail, whiteSpace: 'normal' },
             title: line,
-          }, line))),
+          }, line)),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, marginTop: 2 } },
+            h(ActionLink, {
+              label: open ? t('sysCollapse') : t('sysDetails'),
+              onClick: () => { setOpen(value => !value) },
+              disabled: !healthy,
+            }))),
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flex: 'none' } },
           h('span', { style: { ...TEXT.value, color: 'var(--dsw-alias-label-tertiary)' } },
             featured === undefined ? '—' : pctText(featured.usedPct)),
@@ -559,7 +677,8 @@ window.__ModuleLoader__.load({
             onClick: () => { void sys.refresh() },
             onMouseEnter: event => { event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)' },
             onMouseLeave: event => { event.currentTarget.style.background = 'transparent' },
-          }, '↻'))))
+          }, '↻'))),
+      details)
     }
 
     /**

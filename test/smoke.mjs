@@ -198,18 +198,33 @@ const SYSMON = '/api/deepseek-balance/sysmon'
       statfs: async () => { throw new Error('EACCES') },
     })).length === 0)
 
+  const meminfo = 'MemTotal: 2097152 kB\nMemAvailable: 1048576 kB\n'
+  const mountText = '/dev/vda3 / ext4 rw 0 0\n'
   let call = 0
+  let clock = 1_000_000
   const sampler = sysmon.createSampler({
     readFile: async (path) => {
       if (path === '/proc/stat') {
         call += 1
         return call === 1 ? 'cpu  0 0 0 100 0 0 0 0 0 0\n' : 'cpu  50 0 0 150 0 0 0 0 0 0\n'
       }
-      return '/dev/vda3 / ext4 rw 0 0\n'
+      if (path === '/proc/meminfo') return meminfo
+      if (path === '/proc/diskstats') {
+        return call === 1
+          ? '254 0 vda 10 0 100 0 20 0 200 0 0 0 0\n'
+          : '254 0 vda 20 0 300 0 40 0 600 0 0 0 0\n'
+      }
+      if (path === '/proc/net/dev') {
+        return call === 1
+          ? 'Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n    lo: 9 0 0 0 0 0 0 0 9 0 0 0 0 0 0 0\n  eth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0\n'
+          : 'Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n    lo: 9 0 0 0 0 0 0 0 9 0 0 0 0 0 0 0\n  eth0: 4000 0 0 0 0 0 0 0 5000 0 0 0 0 0 0 0\n'
+      }
+      return mountText
     },
     statfs: fakeStatfs,
     loadavg: () => [0.5, 0.4, 0.3],
     cpuCount: () => 2,
+    now: () => { const value = clock; clock += 3_000; return value },
   })
   const first = await sampler.sample()
   const second = await sampler.sample()
@@ -218,6 +233,34 @@ const SYSMON = '/api/deepseek-balance/sysmon'
   check('the sampler reports cores and load',
     second.cpu.cores === 2 && second.cpu.load1 === 0.5 && second.cpu.load15 === 0.3, JSON.stringify(second.cpu))
   check('the sampler keeps the last snapshot', sampler.get() === second)
+  check('the sampler reports memory', second.memory?.usedPct === 50 && second.memory.totalText === '2G', JSON.stringify(second.memory))
+  check('the sampler turns disk sectors into a rate',
+    second.io.writeBps === Math.round((400 * 512) / 3) && second.io.writeText.endsWith('/s'), JSON.stringify(second.io))
+  check('the sampler turns network counters into a rate',
+    second.net.rxBps === 1000 && second.net.txBps === 1000, JSON.stringify(second.net))
+  check('the first sample leaves rates unknown', first.io.readBps === null && first.net.rxBps === null, JSON.stringify(first.io))
+  check('the sampler accumulates a trend history',
+    second.history.length === 2 && second.history[1].cpu === 50 && second.history[1].mem === 50,
+    JSON.stringify(second.history))
+}
+
+{
+  const mem = sysmon.parseMeminfo('MemTotal: 2097152 kB\nMemAvailable: 1048576 kB\n')
+  check('meminfo converts kB and computes the percentage',
+    mem.totalBytes === 2_147_483_648 && mem.usedBytes === 1_073_741_824 && mem.usedPct === 50, JSON.stringify(mem))
+  check('meminfo falls back to MemFree', sysmon.parseMeminfo('MemTotal: 1024 kB\nMemFree: 256 kB\n')?.usedBytes === 768 * 1024)
+  check('meminfo rejects a missing total', sysmon.parseMeminfo('MemFree: 256 kB\n') === undefined)
+
+  const io = sysmon.parseDiskstats('254 0 vda 10 0 100 0 20 0 200 0 0 0 0\n254 1 vda3 5 0 999 0 1 0 999 0 0 0 0\n')
+  check('diskstats counts whole devices only',
+    io.readBytes === 100 * 512 && io.writeBytes === 200 * 512, JSON.stringify(io))
+
+  const net = sysmon.parseNetdev('Inter-| Receive | Transmit\n    lo: 9 0 0 0 0 0 0 0 9 0 0 0 0 0 0 0\n  eth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0\n')
+  check('netdev skips loopback', net.rxBytes === 1000 && net.txBytes === 2000, JSON.stringify(net))
+
+  check('rates divide by the elapsed time', sysmon.ratePerSecond(1000, 4000, 3_000) === 1000)
+  check('rates stay unknown without an earlier reading', sysmon.ratePerSecond(undefined, 4000, 3_000) === null)
+  check('rate text carries the unit', sysmon.formatRate(1024) === '1K/s' && sysmon.formatRate(null) === '—')
 }
 
 // ── System route failure shape ───────────────────────────────────────────────
@@ -438,7 +481,15 @@ const translate = fakeCtx.locale.bind('dshBalance')
 const sysmonData = {
   ok: true,
   sampledAt: Date.now(),
+  intervalMs: 3000,
   cpu: { usagePct: 12.5, cores: 2, load1: 0.68, load5: 0.43, load15: 0.35 },
+  memory: { totalBytes: 2_147_483_648, usedBytes: 1_073_741_824, usedPct: 50, totalText: '2G', usedText: '1G', availText: '1G' },
+  io: { readBps: 0, writeBps: 1024, readText: '0B/s', writeText: '1K/s' },
+  net: { rxBps: 2048, txBps: 512, rxText: '2K/s', txText: '512B/s' },
+  history: [
+    { t: 1, cpu: 8, mem: 49, read: 0, write: 512, rx: 1024, tx: 256 },
+    { t: 2, cpu: 12.5, mem: 50, read: 0, write: 1024, rx: 2048, tx: 512 },
+  ],
   disks: [
     { device: '/dev/vda3', mount: '/', fstype: 'ext4', totalBytes: 42_949_672_960, usedBytes: 10_200_000_000, availBytes: 30_000_000_000, usedPct: 26, totalText: '40G', usedText: '9.5G', availText: '28G' },
     { device: '/dev/vda2', mount: '/boot/efi', fstype: 'vfat', totalBytes: 206_000_000, usedBytes: 6_600_000, availBytes: 200_000_000, usedPct: 4, totalText: '197M', usedText: '6.3M', availText: '191M' },
@@ -450,6 +501,9 @@ const sysmonData = {
   check('system row shows CPU percentage and cores',
     text.includes('sysCpu{"pct":"12.5"}') && text.includes('sysCores{"n":2}') && text.includes('sysLoad'), text)
   check('system row lists disks', text.includes('sysDisk{"mount":"/","used":"9.5G","total":"40G","pct":26}'), text)
+  check('system row reports memory',
+    text.includes('sysMem{"used":"1G","total":"2G","pct":50}'), text)
+  check('system row offers the details toggle', text.includes('sysDetails'), text)
   check('system row features the root usage on the right', text.includes('26%'), text)
 }
 

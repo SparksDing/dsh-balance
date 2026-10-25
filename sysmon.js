@@ -1,8 +1,9 @@
 /**
- * System sampling for the status row: CPU busy ratio from `/proc/stat`, disk
- * usage per real filesystem from `/proc/mounts` plus `statfs`, and the load
- * average. Linux-shaped, dependency-free, and injectable so the smoke test can
- * drive it with synthetic `/proc` text.
+ * System sampling for the status row: CPU busy ratio from `/proc/stat`, memory
+ * from `/proc/meminfo`, disk I/O from `/proc/diskstats`, network from
+ * `/proc/net/dev`, per-filesystem usage from `/proc/mounts` plus `statfs`, and
+ * the load average. Linux-shaped, dependency-free, and injectable so the smoke
+ * test can drive it with synthetic `/proc` text.
  *
  * @module @local/dsh-balance/sysmon
  */
@@ -20,6 +21,100 @@ const REAL_FS = new Set([
 const SKIP_MOUNT = /^\/(proc|sys|dev|run|snap|var\/lib\/docker)(\/|$)/
 /** Mountpoints listed at most, largest filesystem first. */
 const MAX_DISKS = 8
+/** Snapshots kept for the sparklines; at the 3s default this is two minutes. */
+const MAX_HISTORY = 40
+/** Block devices whose counters represent real I/O (partitions roll up into them). */
+const DISK_NAME = /^(sd[a-z]+|hd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+|mmcblk\d+)$/
+/** Bytes in one `/proc/diskstats` sector. */
+const SECTOR_BYTES = 512
+
+/**
+ * Read total and available memory out of `/proc/meminfo`.
+ * @param text - file contents.
+ * @returns memory figures, or undefined when the file is unusable.
+ */
+export function parseMeminfo(text) {
+  const values = new Map()
+  for (const line of String(text).split('\n')) {
+    const match = /^(\w+):\s+(\d+)/.exec(line)
+    if (match !== null) values.set(match[1], Number(match[2]) * 1024)
+  }
+  const totalBytes = values.get('MemTotal')
+  const availBytes = values.get('MemAvailable') ?? values.get('MemFree')
+  if (!(totalBytes > 0) || availBytes === undefined) return undefined
+  const usedBytes = Math.max(0, totalBytes - availBytes)
+  return {
+    totalBytes,
+    usedBytes,
+    availBytes,
+    usedPct: Math.round((100 * usedBytes) / totalBytes),
+    totalText: formatBytes(totalBytes),
+    usedText: formatBytes(usedBytes),
+    availText: formatBytes(availBytes),
+  }
+}
+
+/**
+ * Sum cumulative read/written bytes out of `/proc/diskstats`.
+ * @param text - file contents.
+ * @returns cumulative byte counters for real block devices.
+ */
+export function parseDiskstats(text) {
+  let readSectors = 0
+  let writeSectors = 0
+  for (const line of String(text).trim().split('\n')) {
+    const fields = line.trim().split(/\s+/)
+    if (fields.length < 10) continue
+    if (!DISK_NAME.test(fields[2])) continue
+    readSectors += Number(fields[5]) || 0
+    writeSectors += Number(fields[9]) || 0
+  }
+  return { readBytes: readSectors * SECTOR_BYTES, writeBytes: writeSectors * SECTOR_BYTES }
+}
+
+/**
+ * Sum cumulative received/sent bytes out of `/proc/net/dev`, loopback excluded.
+ * @param text - file contents.
+ * @returns cumulative byte counters.
+ */
+export function parseNetdev(text) {
+  let rxBytes = 0
+  let txBytes = 0
+  for (const line of String(text).split('\n')) {
+    const separator = line.indexOf(':')
+    if (separator === -1) continue
+    const name = line.slice(0, separator).trim()
+    if (name === '' || name === 'lo') continue
+    const fields = line.slice(separator + 1).trim().split(/\s+/)
+    if (fields.length < 9) continue
+    rxBytes += Number(fields[0]) || 0
+    txBytes += Number(fields[8]) || 0
+  }
+  return { rxBytes, txBytes }
+}
+
+/**
+ * Per-second rate between two cumulative counters.
+ * @param previousBytes - earlier reading, absent for the first sample.
+ * @param nextBytes - later reading.
+ * @param elapsedMs - time between the readings.
+ * @returns bytes per second, rounded, or null before a delta exists.
+ */
+export function ratePerSecond(previousBytes, nextBytes, elapsedMs) {
+  if (previousBytes === undefined || nextBytes === undefined || !(elapsedMs > 0)) return null
+  const delta = nextBytes - previousBytes
+  if (delta < 0) return null
+  return Math.round((delta * 1000) / elapsedMs)
+}
+
+/**
+ * Format a bytes-per-second rate.
+ * @param bytesPerSecond - rate, or null before the first delta.
+ * @returns text such as `12.3K/s`.
+ */
+export function formatRate(bytesPerSecond) {
+  return bytesPerSecond === null ? '—' : `${formatBytes(bytesPerSecond)}/s`
+}
 
 /**
  * Decode the octal escapes `/proc/mounts` uses for whitespace and backslashes.
@@ -150,23 +245,50 @@ export function createSampler(deps = {}) {
   const fs = deps.statfs ?? statfs
   const load = deps.loadavg ?? loadavg
   const cpuCount = deps.cpuCount ?? (() => cpus().length)
-  let previousCpu
+  const now = deps.now ?? (() => Date.now())
+  const history = []
+  let previous
   let snapshot = {
     ok: true,
     sampledAt: 0,
+    intervalMs: 0,
     cpu: { usagePct: null, cores: cpuCount(), load1: 0, load5: 0, load15: 0 },
+    memory: undefined,
+    io: { readBps: null, writeBps: null, readText: '—', writeText: '—' },
+    net: { rxBps: null, txBps: null, rxText: '—', txText: '—' },
     disks: [],
+    history: [],
   }
 
   const sample = async () => {
+    const at = now()
+    const elapsedMs = previous === undefined ? 0 : at - previous.at
     const cpu = parseCpuLine(await read('/proc/stat', 'utf8'))
-    const usagePct = busyPct(previousCpu, cpu)
-    if (cpu !== undefined) previousCpu = cpu
+    const usagePct = busyPct(previous?.cpu, cpu)
+    const memory = parseMeminfo(await read('/proc/meminfo', 'utf8'))
+    const io = parseDiskstats(await read('/proc/diskstats', 'utf8'))
+    const net = parseNetdev(await read('/proc/net/dev', 'utf8'))
+    const readBps = ratePerSecond(previous?.io.readBytes, io.readBytes, elapsedMs)
+    const writeBps = ratePerSecond(previous?.io.writeBytes, io.writeBytes, elapsedMs)
+    const rxBps = ratePerSecond(previous?.net.rxBytes, net.rxBytes, elapsedMs)
+    const txBps = ratePerSecond(previous?.net.txBytes, net.txBytes, elapsedMs)
+    previous = { at, cpu, io, net }
     const [load1, load5, load15] = load()
     const disks = await sampleDisks({ readFile: read, statfs: fs })
+    history.push({
+      t: at,
+      cpu: usagePct,
+      mem: memory === undefined ? null : memory.usedPct,
+      read: readBps,
+      write: writeBps,
+      rx: rxBps,
+      tx: txBps,
+    })
+    if (history.length > MAX_HISTORY) history.shift()
     snapshot = {
       ok: true,
-      sampledAt: Date.now(),
+      sampledAt: at,
+      intervalMs: elapsedMs,
       cpu: {
         usagePct,
         cores: cpuCount(),
@@ -174,7 +296,11 @@ export function createSampler(deps = {}) {
         load5: Math.round(load5 * 100) / 100,
         load15: Math.round(load15 * 100) / 100,
       },
+      memory,
+      io: { readBps, writeBps, readText: formatRate(readBps), writeText: formatRate(writeBps) },
+      net: { rxBps, txBps, rxText: formatRate(rxBps), txText: formatRate(txBps) },
       disks,
+      history: [...history],
     }
     return snapshot
   }
