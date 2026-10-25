@@ -416,7 +416,7 @@ export function registerUsage(ctx, options = {}) {
     try {
       for (const event of session.snapshotEvents()) {
         if (event.type !== 'user/message') continue
-        const text = promptText(event.data?.message?.content)
+        const text = promptText(event.data?.content)
         if (text !== '') return text
       }
     } catch {
@@ -427,7 +427,7 @@ export function registerUsage(ctx, options = {}) {
 
   ctx.effect(() => ctx.on('session/event', (session, event) => {
     if (event.type === 'user/message') {
-      const text = promptText(event.data?.message?.content)
+      const text = promptText(event.data?.content)
       if (text !== '') {
         tracker.label?.(session.id, text)
         labelled.add(session.id)

@@ -442,7 +442,7 @@ const dayKeyOf = date => `${date.getFullYear()}-${String(date.getMonth() + 1).pa
   check('usage registers one GET route',
     registered.length === 1 && JSON.stringify(registered[0].methods) === '["GET"]', JSON.stringify(registered.map(r => r.path)))
   check('usage subscribes to session events', handlers.length === 1)
-  handlers[0]({ id: 's1' }, { type: 'user/message', data: { message: { content: [{ type: 'text', text: '帮我看下这个磁盘占用' }] } } })
+  handlers[0]({ id: 's1' }, { type: 'user/message', data: { content: [{ type: 'text', text: '帮我看下这个磁盘占用' }] } })
   handlers[0]({ id: 's1' }, { type: 'request/context', data: { model: 'deepseek-flash' } })
   handlers[0]({ id: 's1' }, { type: 'assistant/message', time: Date.UTC(2026, 9, 26, 12, 0), data: { usage: { inputTokens: 1_000_000, cacheReadTokens: 850_000, outputTokens: 60_000 } } })
   handlers[0]({ id: 's1' }, { type: 'assistant/message', time: Date.UTC(2026, 9, 26, 12, 0), data: {} })
@@ -461,7 +461,7 @@ const dayKeyOf = date => `${date.getFullYear()}-${String(date.getMonth() + 1).pa
     requestContext: () => ({ model: 'deepseek-v4-pro' }),
     snapshotEvents: () => [
       { type: 'turn/start', data: {} },
-      { type: 'user/message', data: { message: { content: [{ type: 'text', text: '把侧边栏胶囊改成两行' }] } } },
+      { type: 'user/message', data: { content: [{ type: 'text', text: '把侧边栏胶囊改成两行' }] } },
     ],
   }
   retroHandlers[0](oldSession, { type: 'assistant/message', time: Date.now(), data: { usage: { inputTokens: 1000, outputTokens: 100 } } })
