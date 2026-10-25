@@ -1,15 +1,17 @@
 {
   "name": "@local/dsh-balance",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "DeepSeek API 账户余额：侧边栏余额胶囊 + 设置行，支持在界面上设置/更换/清除 key。",
+  "description": "DeepSeek API 余额 + 系统状态（CPU/磁盘）：侧边栏胶囊 + 设置行，key 只在 Host 侧使用。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
   },
   "files": [
     "index.js",
+    "http.js",
+    "sysmon.js",
     "client.js",
     "cordis.patch.yml",
     "README.md"

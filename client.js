@@ -19,6 +19,7 @@ window.__ModuleLoader__.load({
     /** Host routes relative to the page origin, behind Connection's authentication. */
     const ROUTE = '/api/deepseek-balance/state'
     const KEY_ROUTE = '/api/deepseek-balance/key'
+    const SYSMON_ROUTE = '/api/deepseek-balance/sysmon'
     /** Background refresh cadence while the page is open. */
     const POLL_MS = 30_000
     /** Currency symbols for the wallets DeepSeek reports. */
@@ -54,6 +55,12 @@ window.__ModuleLoader__.load({
       sourceEnv: '环境变量',
       sourceWarning: '当前 key 来自{source}，文件里的设置不生效',
       keyTailLabel: '当前 key …{tail}',
+      sysTitle: '系统状态',
+      sysCpu: 'CPU {pct}%',
+      sysCores: '{n} 核',
+      sysLoad: '负载 {l1} {l5} {l15}',
+      sysDisk: '{mount} {used} / {total}（已用 {pct}%）',
+      sysUnavailable: '系统信息不可用',
     }
 
     const en = {
@@ -86,6 +93,12 @@ window.__ModuleLoader__.load({
       sourceEnv: 'the environment',
       sourceWarning: 'The key comes from {source}, so the stored file is ignored',
       keyTailLabel: 'key …{tail}',
+      sysTitle: 'System status',
+      sysCpu: 'CPU {pct}%',
+      sysCores: '{n} cores',
+      sysLoad: 'load {l1} {l5} {l15}',
+      sysDisk: '{mount} {used} / {total} ({pct}% used)',
+      sysUnavailable: 'System information unavailable',
     }
 
     /**
@@ -146,7 +159,7 @@ window.__ModuleLoader__.load({
      * @param store - balance store.
      * @returns the current state, re-rendering on every publish.
      */
-    function useBalance(store) {
+    function useStoreState(store) {
       const [state, setState] = React.useState(store.get())
       React.useEffect(() => store.subscribe(() => { setState(store.get()) }), [store])
       return state
@@ -300,7 +313,7 @@ window.__ModuleLoader__.load({
      * @returns the row element tree.
      */
     function BalanceRow({ t, bal }) {
-      const state = useBalance(bal)
+      const state = useStoreState(bal)
       const view = describe(state, t)
       const data = state.data
       const [editing, setEditing] = React.useState(false)
@@ -453,7 +466,7 @@ window.__ModuleLoader__.load({
      * @returns the pill element tree.
      */
     function BalancePill({ t, bal, wide }) {
-      const state = useBalance(bal)
+      const state = useStoreState(bal)
       const view = describe(state, t)
       const wallet = primaryWallet(state.data)
       const label = wide
@@ -472,6 +485,108 @@ window.__ModuleLoader__.load({
         title: tooltip,
         'aria-label': tooltip,
         onClick: () => { void bal.refresh() },
+        onMouseEnter: event => { event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)' },
+        onMouseLeave: event => { event.currentTarget.style.background = 'transparent' },
+      }, h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, label))
+    }
+
+
+    /** Format a percentage for display, tolerating a missing sample. */
+    function pctText(value) {
+      return typeof value === 'number' && Number.isFinite(value) ? `${value}%` : '—'
+    }
+
+    /** The filesystem a summary should feature: root, else the largest. */
+    function primaryDisk(disks) {
+      if (!Array.isArray(disks)) return undefined
+      return disks.find(disk => disk.mount === '/') ?? disks[0]
+    }
+
+    /**
+     * Settings → General row for CPU, load average, and disk usage.
+     * @param props - composed slot props (locale seat plus the injected store).
+     * @returns the row element tree.
+     */
+    function SysmonRow({ t, sys }) {
+      const state = useStoreState(sys)
+      const data = state.data
+      const pending = state.phase === 'loading'
+      const healthy = data !== undefined && data.ok === true
+      const cpu = healthy ? data.cpu : undefined
+      const disks = healthy && Array.isArray(data.disks) ? data.disks : []
+      const featured = primaryDisk(disks)
+      const lines = []
+      if (data === undefined) {
+        lines.push(state.phase === 'error'
+          ? t('failed', { message: state.transportError ?? 'route' })
+          : t('loading'))
+      } else if (!healthy) {
+        lines.push(data.error?.code === 'sampling-failed'
+          ? t('failed', { message: data.error.message })
+          : t('sysUnavailable'))
+      } else {
+        lines.push([
+          t('sysCpu', { pct: pctText(cpu?.usagePct).replace('%', '') }),
+          t('sysCores', { n: cpu?.cores ?? '—' }),
+          t('sysLoad', { l1: cpu?.load1 ?? '—', l5: cpu?.load5 ?? '—', l15: cpu?.load15 ?? '—' }),
+        ].join(' · '))
+        for (const disk of disks.slice(0, 3)) {
+          lines.push(t('sysDisk', {
+            mount: disk.mount, used: disk.usedText, total: disk.totalText, pct: disk.usedPct,
+          }))
+        }
+      }
+      return h('div', {
+        style: { padding: '16px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },
+      },
+      h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 8 } },
+        h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4, paddingRight: 24 } },
+          h('div', { style: TEXT.title }, t('sysTitle')),
+          ...lines.map((line, index) => h('div', {
+            key: String(index),
+            style: { ...TEXT.detail, whiteSpace: 'normal' },
+            title: line,
+          }, line))),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 4, flex: 'none' } },
+          h('span', { style: { ...TEXT.value, color: 'var(--dsw-alias-label-tertiary)' } },
+            featured === undefined ? '—' : pctText(featured.usedPct)),
+          h('button', {
+            type: 'button',
+            style: { ...TEXT.refresh, opacity: pending ? 0.5 : 1 },
+            title: t('refresh'),
+            'aria-label': t('refresh'),
+            disabled: pending,
+            onClick: () => { void sys.refresh() },
+            onMouseEnter: event => { event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)' },
+            onMouseLeave: event => { event.currentTarget.style.background = 'transparent' },
+          }, '↻'))))
+    }
+
+    /**
+     * Sidebar footer pill for CPU usage; hidden on the collapsed rail, where the
+     * balance symbol already owns the tight space.
+     * @param props - composed slot props (`wide` owner share plus locale and store).
+     * @returns the pill element tree, or null on the rail.
+     */
+    function SysmonPill({ t, sys, wide }) {
+      const state = useStoreState(sys)
+      if (wide !== true) return null
+      const data = state.data
+      const healthy = data !== undefined && data.ok === true
+      const cpu = healthy ? data.cpu : undefined
+      const featured = healthy ? primaryDisk(data.disks) : undefined
+      const label = `CPU ${pctText(cpu?.usagePct)}`
+      const tooltip = featured === undefined
+        ? `${t('sysTitle')} · ${label}`
+        : `${t('sysTitle')} · ${label} · ${t('sysDisk', {
+          mount: featured.mount, used: featured.usedText, total: featured.totalText, pct: featured.usedPct,
+        })}`
+      return h('button', {
+        type: 'button',
+        style: { ...TEXT.pill, color: 'var(--dsw-alias-label-tertiary)' },
+        title: tooltip,
+        'aria-label': tooltip,
+        onClick: () => { void sys.refresh() },
         onMouseEnter: event => { event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)' },
         onMouseLeave: event => { event.currentTarget.style.background = 'transparent' },
       }, h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis' } }, label))
@@ -518,6 +633,45 @@ window.__ModuleLoader__.load({
           locale: NS,
           inject: () => ({ bal }),
         }, BalancePill))
+        const sysmonStore = createStore(async () => {
+          const response = await fetch(SYSMON_ROUTE, {
+            headers: { accept: 'application/json' },
+            cache: 'no-store',
+          })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          return response.json()
+        })
+        const sys = {
+          get: sysmonStore.get,
+          subscribe: sysmonStore.subscribe,
+          refresh: sysmonStore.refresh,
+        }
+        ctx.effect(() => {
+          void sysmonStore.refresh()
+          const timer = setInterval(() => { void sysmonStore.refresh() }, 10_000)
+          const onVisibility = () => {
+            if (document.visibilityState === 'visible') void sysmonStore.refresh()
+          }
+          document.addEventListener('visibilitychange', onVisibility)
+          return () => {
+            clearInterval(timer)
+            document.removeEventListener('visibilitychange', onVisibility)
+          }
+        }, 'dsh-balance: system polling')
+        ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+          name: 'settings.general.item',
+          id: 'system-status',
+          order: 30,
+          locale: NS,
+          inject: () => ({ sys }),
+        }, SysmonRow))
+        ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+          name: 'sidebar.footer.action',
+          id: 'system-status',
+          order: 20,
+          locale: NS,
+          inject: () => ({ sys }),
+        }, SysmonPill))
       },
     }
   },

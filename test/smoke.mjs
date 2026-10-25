@@ -52,6 +52,7 @@ const apiBase = `http://127.0.0.1:${server.address().port}`
 // ── Host half ────────────────────────────────────────────────────────────────
 
 const host = await import(pathToFileURL(join(root, 'index.js')).href)
+const sysmon = await import(pathToFileURL(join(root, 'sysmon.js')).href)
 check('host exports the package name', host.name === '@local/dsh-balance', host.name)
 check('host injects connection and webServer', JSON.stringify(host.inject) === '["connection","webServer"]')
 
@@ -89,13 +90,16 @@ async function postKey(route, body) {
 
 const STATE = '/api/deepseek-balance/state'
 const KEY = '/api/deepseek-balance/key'
+const SYSMON = '/api/deepseek-balance/sysmon'
 
 {
   const { ctx, routes, webRoutes } = hostContext()
   host.apply(ctx, { apiBase, apiKey: 'sk-test-1234', cacheMs: 0 })
-  check('host registers the state and key routes', routes.has(STATE) && routes.has(KEY), [...routes.keys()].join(','))
+  check('host registers the state, key, and system routes',
+    routes.has(STATE) && routes.has(KEY) && routes.has(SYSMON), [...routes.keys()].join(','))
   check('state route is GET only', JSON.stringify(routes.get(STATE).methods) === '["GET"]')
   check('key route is POST only', JSON.stringify(routes.get(KEY).methods) === '["POST"]')
+  check('system route is GET only', JSON.stringify(routes.get(SYSMON).methods) === '["GET"]')
   const { status, body } = await readState(routes.get(STATE))
   check('state route answers 200', status === 200)
   check('state reports the wallet', body.ok === true && body.wallets[0].total === '110.25', JSON.stringify(body))
@@ -106,6 +110,7 @@ const KEY = '/api/deepseek-balance/key'
   let pingBody
   webRoutes[0].handler({}, { writeHead() {}, end(value) { pingBody = value } })
   check('ping carries no account data', pingBody.includes('"ok":true') && !pingBody.includes('110'), pingBody)
+  check('ping lists the served routes', pingBody.includes('"routes"') && pingBody.includes('sysmon'), pingBody)
 }
 
 {
@@ -127,6 +132,111 @@ const KEY = '/api/deepseek-balance/key'
   host.apply(ctx, { apiBase: 'http://127.0.0.1:1', apiKey: 'sk-test-1234', timeoutMs: 500, cacheMs: 0 })
   const { body } = await readState(routes.get(STATE))
   check('unreachable endpoint reports network', body.ok === false && body.error.code === 'network', JSON.stringify(body))
+}
+
+{
+  const { ctx, routes } = hostContext()
+  host.apply(ctx, { apiBase, apiKey: 'sk-test-1234', cacheMs: 0 })
+  const response = await routes.get(SYSMON).fetch(new Request('http://local/api/deepseek-balance/sysmon'))
+  const body = await response.json()
+  check('system route answers 200', response.status === 200)
+  check('system route reports either a snapshot or a sampling failure',
+    body.ok === true || body.error?.code === 'sampling-failed', JSON.stringify(body).slice(0, 200))
+  if (body.ok === true) {
+    check('system route reports CPU cores', Number(body.cpu.cores) > 0, JSON.stringify(body.cpu))
+    check('system route reports at least the root filesystem',
+      body.disks.some(disk => disk.mount === '/'), JSON.stringify(body.disks).slice(0, 200))
+    check('system route formats disk sizes', body.disks.every(disk => /^\d/.test(disk.usedText) && /^\d/.test(disk.totalText)))
+  }
+}
+
+// ── Sampler primitives ───────────────────────────────────────────────────────
+
+{
+  const parsed = sysmon.parseCpuLine('cpu  1 2 3 4 5 6 7 8 0 0\ncpu0 1 2 3 4 5 6 7 8 0 0\n')
+  check('cpu line sums every field', parsed.total === 36 && parsed.idle === 9, JSON.stringify(parsed))
+  check('cpu line ignores a missing aggregate', sysmon.parseCpuLine('cpu0 1 2 3 4 5 6 7 8 0 0') === undefined)
+  check('busy percentage uses the delta',
+    sysmon.busyPct({ total: 100, idle: 80 }, { total: 200, idle: 100 }) === 80,
+    String(sysmon.busyPct({ total: 100, idle: 80 }, { total: 200, idle: 100 })))
+  check('the first sample has no percentage', sysmon.busyPct(undefined, { total: 10, idle: 5 }) === null)
+  check('a stalled counter yields no percentage', sysmon.busyPct({ total: 10, idle: 5 }, { total: 10, idle: 5 }) === null)
+
+  const mounts = sysmon.parseMounts([
+    '/dev/vda3 / ext4 rw,relatime 0 0',
+    'proc /proc proc rw 0 0',
+    'tmpfs /run tmpfs rw 0 0',
+    '/dev/vda3 /mnt/bind ext4 rw 0 0',
+    '/dev/vda2 /boot/efi vfat rw 0 0',
+    'overlay /var/lib/docker/overlay2/x/merged overlay rw 0 0',
+    '/dev/vdb1 /mnt/my\\040disk xfs rw 0 0',
+  ].join('\n'))
+  check('mounts keep only real filesystems', mounts.every(row => row.fstype !== 'proc' && row.fstype !== 'tmpfs'),
+    JSON.stringify(mounts))
+  check('mounts keep one row per device', mounts.filter(row => row.device === '/dev/vda3').length === 1,
+    JSON.stringify(mounts))
+  check('mounts decode escaped spaces', mounts.some(row => row.mount === '/mnt/my disk'), JSON.stringify(mounts))
+  check('mounts skip container mounts',
+    mounts.every(row => !row.mount.startsWith('/var/lib/docker')), JSON.stringify(mounts))
+
+  check('byte formatting keeps one decimal above a gigabyte',
+    sysmon.formatBytes(42949672960) === '40G' && sysmon.formatBytes(1536) === '1.5K' && sysmon.formatBytes(1023) === '1023B',
+    `${sysmon.formatBytes(42949672960)} ${sysmon.formatBytes(1536)} ${sysmon.formatBytes(1023)}`)
+
+  const fakeStatfs = async () => ({ bsize: 4096, blocks: 10485760, bfree: 7340032, bavail: 6815744 })
+  const disks = await sysmon.sampleDisks({
+    readFile: async () => '/dev/vda3 / ext4 rw 0 0\nproc /proc proc rw 0 0\n',
+    statfs: fakeStatfs,
+  })
+  check('disk sampling reports one filesystem', disks.length === 1, JSON.stringify(disks))
+  check('disk sampling computes totals and percentages',
+    disks[0].totalBytes === 42_949_672_960 && disks[0].usedPct === 32 && disks[0].totalText === '40G' && disks[0].usedText === '12G',
+    JSON.stringify(disks[0]))
+  check('disk sampling tolerates an unreadable mount',
+    (await sysmon.sampleDisks({
+      readFile: async () => '/dev/vda3 / ext4 rw 0 0\n',
+      statfs: async () => { throw new Error('EACCES') },
+    })).length === 0)
+
+  let call = 0
+  const sampler = sysmon.createSampler({
+    readFile: async (path) => {
+      if (path === '/proc/stat') {
+        call += 1
+        return call === 1 ? 'cpu  0 0 0 100 0 0 0 0 0 0\n' : 'cpu  50 0 0 150 0 0 0 0 0 0\n'
+      }
+      return '/dev/vda3 / ext4 rw 0 0\n'
+    },
+    statfs: fakeStatfs,
+    loadavg: () => [0.5, 0.4, 0.3],
+    cpuCount: () => 2,
+  })
+  const first = await sampler.sample()
+  const second = await sampler.sample()
+  check('the first sample has no CPU percentage yet', first.cpu.usagePct === null, JSON.stringify(first.cpu))
+  check('the second sample diffs the counters', second.cpu.usagePct === 50, JSON.stringify(second.cpu))
+  check('the sampler reports cores and load',
+    second.cpu.cores === 2 && second.cpu.load1 === 0.5 && second.cpu.load15 === 0.3, JSON.stringify(second.cpu))
+  check('the sampler keeps the last snapshot', sampler.get() === second)
+}
+
+// ── System route failure shape ───────────────────────────────────────────────
+
+{
+  const registered = []
+  const ctx = {
+    effect(fn) { fn(); return () => {} },
+    connection: { fetch: { register(route) { registered.push(route); return () => {} } } },
+  }
+  sysmon.registerSysmon(ctx, {
+    path: '/api/deepseek-balance/sysmon',
+    intervalMs: 50,
+    sampler: { get: () => ({ ok: true, sampledAt: 1, cpu: {}, disks: [] }), sample: async () => { throw new Error('boom') } },
+  })
+  await new Promise(resolve => setTimeout(resolve, 120))
+  const response = await registered[0].fetch(new Request('http://local/api/deepseek-balance/sysmon'))
+  const body = await response.json()
+  check('a sampling failure is reported, not thrown', body.ok === false && body.error.code === 'sampling-failed', JSON.stringify(body))
 }
 
 // ── Key write route ──────────────────────────────────────────────────────────
@@ -227,11 +337,17 @@ const fakeCtx = {
   },
 }
 plugin.apply(fakeCtx)
-check('client registers both surfaces', registrations.length === 2, String(registrations.length))
-const row = registrations.find(r => r.options.name === 'settings.general.item')
-const pill = registrations.find(r => r.options.name === 'sidebar.footer.action')
+check('client registers four surfaces', registrations.length === 4, String(registrations.length))
+const rows = registrations.filter(r => r.options.name === 'settings.general.item')
+const pills = registrations.filter(r => r.options.name === 'sidebar.footer.action')
+const row = rows.find(r => r.options.id === 'deepseek-balance')
+const pill = pills.find(r => r.options.id === 'deepseek-balance')
+const sysRow = rows.find(r => r.options.id === 'system-status')
+const sysPill = pills.find(r => r.options.id === 'system-status')
 check('row registered into settings.general.item', row !== undefined)
 check('pill registered into sidebar.footer.action', pill !== undefined)
+check('system row registered into settings.general.item', sysRow !== undefined)
+check('system pill registered into sidebar.footer.action', sysPill !== undefined)
 check('row carries the locale seat', row.options.locale === 'dshBalance')
 
 /** Flatten a rendered tree into its text. */
@@ -317,6 +433,36 @@ const translate = fakeCtx.locale.bind('dshBalance')
   const view = pill.component({ t: translate, bal: storeState('ready', readyData), wide: true })
   check('pill carries a tooltip',
     typeof view.props.title === 'string' && view.props.title.startsWith('title') && view.props.title.includes('¥110.25'))
+}
+
+const sysmonData = {
+  ok: true,
+  sampledAt: Date.now(),
+  cpu: { usagePct: 12.5, cores: 2, load1: 0.68, load5: 0.43, load15: 0.35 },
+  disks: [
+    { device: '/dev/vda3', mount: '/', fstype: 'ext4', totalBytes: 42_949_672_960, usedBytes: 10_200_000_000, availBytes: 30_000_000_000, usedPct: 26, totalText: '40G', usedText: '9.5G', availText: '28G' },
+    { device: '/dev/vda2', mount: '/boot/efi', fstype: 'vfat', totalBytes: 206_000_000, usedBytes: 6_600_000, availBytes: 200_000_000, usedPct: 4, totalText: '197M', usedText: '6.3M', availText: '191M' },
+  ],
+}
+
+{
+  const text = textOf(sysRow.component({ t: translate, sys: storeState('ready', sysmonData) }))
+  check('system row shows CPU percentage and cores',
+    text.includes('sysCpu{"pct":"12.5"}') && text.includes('sysCores{"n":2}') && text.includes('sysLoad'), text)
+  check('system row lists disks', text.includes('sysDisk{"mount":"/","used":"9.5G","total":"40G","pct":26}'), text)
+  check('system row features the root usage on the right', text.includes('26%'), text)
+}
+
+{
+  const text = textOf(sysRow.component({ t: translate, sys: storeState('error', undefined, 'HTTP 500') }))
+  check('system row reports a transport failure', text.includes('failed{"message":"HTTP 500"}'), text)
+}
+
+{
+  const text = textOf(sysPill.component({ t: translate, sys: storeState('ready', sysmonData), wide: true }))
+  check('wide system pill shows CPU usage', text.includes('CPU 12.5%'), text)
+  const rail = sysPill.component({ t: translate, sys: storeState('ready', sysmonData), wide: false })
+  check('system pill is hidden on the collapsed rail', rail === null)
 }
 
 {

@@ -14,6 +14,8 @@
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { json } from './http.js'
+import { registerSysmon } from './sysmon.js'
 
 /** Stable Cordis plugin name; the Client module registers under the package name. */
 export const name = '@local/dsh-balance'
@@ -27,10 +29,12 @@ const DEFAULT_API_BASE = 'https://api.deepseek.com'
 const STATE_PATH = '/api/deepseek-balance/state'
 /** Authenticated key write route; only a signed-in page reaches it. */
 const KEY_PATH = '/api/deepseek-balance/key'
+/** Authenticated system-status route (CPU, disk, load). */
+const SYSMON_PATH = '/api/deepseek-balance/sysmon'
 /** Unauthenticated liveness probe naming this plugin and nothing else. */
 const PING_PATH = '/dsh-balance/ping'
 /** Plugin version reported by the ping, so a running Host's loaded build is visible. */
-const VERSION = '0.2.0'
+const VERSION = '0.3.0'
 /** Key file used when neither config nor environment supplies one. */
 const DEFAULT_KEY_FILE = join(homedir(), '.config', 'deepseek', 'api_key')
 /** DeepSeek answers 401 for a missing, deleted, or mistyped key. */
@@ -56,19 +60,6 @@ function expandHome(path) {
  */
 function maskTail(key) {
   return key.length <= 4 ? '' : key.slice(-4)
-}
-
-/**
- * Build one JSON response with no-store caching.
- * @param status - HTTP status code.
- * @param body - JSON-serializable payload.
- * @returns the response.
- */
-function json(status, body) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
-  })
 }
 
 /**
@@ -295,14 +286,22 @@ export function apply(ctx, raw = {}) {
     fetch: handleKey,
   }), 'dsh-balance: key route')
 
+  const sysmonPath = registerSysmon(ctx, {
+    path: SYSMON_PATH,
+    intervalMs: Number(config.sysmonIntervalMs) > 0 ? Number(config.sysmonIntervalMs) : 3_000,
+  })
+
+  const routes = [STATE_PATH, KEY_PATH, sysmonPath]
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: PING_PATH,
     handler: (_request, response) => {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-      response.end(JSON.stringify({ ok: true, plugin: name, version: VERSION, route: STATE_PATH }))
+      response.end(JSON.stringify({ ok: true, plugin: name, version: VERSION, routes }))
     },
   }), 'dsh-balance: ping route')
 
-  ctx.logger?.info?.('[dsh-balance] routes ready: %s, %s -> %s/user/balance', STATE_PATH, KEY_PATH, apiBase)
+  ctx.logger?.info?.('[dsh-balance] routes ready: %s -> %s/user/balance, sysmon at %s',
+    routes.join(', '), apiBase, SYSMON_PATH)
 }
