@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-balance",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "description": "DeepSeek API 余额 + 系统状态（CPU/内存/磁盘/网络）：侧边栏胶囊 + 设置行 + 趋势图。",

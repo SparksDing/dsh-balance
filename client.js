@@ -70,6 +70,7 @@ window.__ModuleLoader__.load({
       sysWriteShort: '磁盘写',
       sysNetShort: '网络↓',
       sysTrendEmpty: '采样点还不够画趋势',
+      sysPill: 'CPU {cpu}% · 磁盘 {disk}%',
     }
 
     const en = {
@@ -117,6 +118,7 @@ window.__ModuleLoader__.load({
       sysWriteShort: 'Disk write',
       sysNetShort: 'Net ↓',
       sysTrendEmpty: 'Not enough samples for a trend yet',
+      sysPill: 'CPU {cpu}% · disk {disk}%',
     }
 
     /**
@@ -611,13 +613,13 @@ window.__ModuleLoader__.load({
           t('sysCores', { n: cpu?.cores ?? '—' }),
           t('sysLoad', { l1: cpu?.load1 ?? '—', l5: cpu?.load5 ?? '—', l15: cpu?.load15 ?? '—' }),
         ].join(' · '))
-        if (memory !== undefined) {
-          lines.push(t('sysMem', { used: memory.usedText, total: memory.totalText, pct: memory.usedPct }))
-        }
         for (const disk of disks.slice(0, open ? disks.length : 1)) {
           lines.push(t('sysDisk', {
             mount: disk.mount, used: disk.usedText, total: disk.totalText, pct: disk.usedPct,
           }))
+        }
+        if (memory !== undefined) {
+          lines.push(t('sysMem', { used: memory.usedText, total: memory.totalText, pct: memory.usedPct }))
         }
       }
       const details = open && healthy
@@ -694,7 +696,10 @@ window.__ModuleLoader__.load({
       const healthy = data !== undefined && data.ok === true
       const cpu = healthy ? data.cpu : undefined
       const featured = healthy ? primaryDisk(data.disks) : undefined
-      const label = `CPU ${pctText(cpu?.usagePct)}`
+      const label = t('sysPill', {
+        cpu: pctText(cpu?.usagePct).replace('%', ''),
+        disk: featured === undefined ? '—' : String(featured.usedPct),
+      })
       const tooltip = featured === undefined
         ? `${t('sysTitle')} · ${label}`
         : `${t('sysTitle')} · ${label} · ${t('sysDisk', {

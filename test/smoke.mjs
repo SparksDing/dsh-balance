@@ -514,7 +514,8 @@ const sysmonData = {
 
 {
   const text = textOf(sysPill.component({ t: translate, sys: storeState('ready', sysmonData), wide: true }))
-  check('wide system pill shows CPU usage', text.includes('CPU 12.5%'), text)
+  check('wide system pill names CPU and disk',
+    text.includes('sysPill{"cpu":"12.5","disk":"26"}'), text)
   const rail = sysPill.component({ t: translate, sys: storeState('ready', sysmonData), wide: false })
   check('system pill is hidden on the collapsed rail', rail === null)
 }

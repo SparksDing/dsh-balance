@@ -34,7 +34,7 @@ const SYSMON_PATH = '/api/deepseek-balance/sysmon'
 /** Unauthenticated liveness probe naming this plugin and nothing else. */
 const PING_PATH = '/dsh-balance/ping'
 /** Plugin version reported by the ping, so a running Host's loaded build is visible. */
-const VERSION = '0.4.0'
+const VERSION = '0.4.1'
 /** Key file used when neither config nor environment supplies one. */
 const DEFAULT_KEY_FILE = join(homedir(), '.config', 'deepseek', 'api_key')
 /** DeepSeek answers 401 for a missing, deleted, or mistyped key. */
