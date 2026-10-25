@@ -7,7 +7,7 @@
 - **key 直接在界面上管**：点「设置 key」粘贴保存，保存前先用 `/user/balance` 校验一次，只有校验通过才写盘；已配置后可以「更换 key」或「清除」。不用 shell，key 也不经过浏览器之外的任何地方。
 - **设置 → 通用 → 系统状态** 一行：CPU 使用率、核数、负载、内存，以及文件系统的已用/总量与百分比（`/`、`/boot/efi` 等，按容量倒序取前 8 个）。
 - 点这一行的「详情」展开：磁盘读/写速率、网络收/发速率、四张迷你趋势图（CPU、内存、磁盘写、网络收，各取最近 40 个采样点），以及全部挂载点的用量表。
-- **设置 → 通用 → 消耗**：把每次调用的 token 用量折成钱——今日花费、缓存命中率、当前是高峰还是平峰，点「详情」按模型列出命中/未命中/输出 token 与各自花费。
+- **设置 → 通用 → 消耗**：把每次调用的 token 用量折成钱——今日花费、缓存命中率、当前是高峰还是平峰，点「详情」按模型列出命中/未命中/输出 token 与各自花费，并附最近 7 天的每日花费。花费**落盘**，重启后不会清零。
 - **侧边栏底部胶囊**：余额旁边再挂一个 `CPU 12.5%`，鼠标悬停看磁盘使用率；侧边栏收起时这个胶囊自动隐藏，只留余额符号。
 - 余额每 30 秒、系统状态每 10 秒自动刷新；切回标签页时立即刷新一次。CPU 由 Host 每 3 秒读一次 `/proc/stat` 求差值。
 
@@ -18,6 +18,7 @@
 | `index.js` | Host 半边：注册 `/api/deepseek-balance/state`（GET，读余额）、`/api/deepseek-balance/key`（POST，存/清 key）、`/api/deepseek-balance/sysmon`（GET，CPU/磁盘/负载）和 `/dsh-balance/ping`（只回插件名、版本与路由表，无账户数据）。前三个走 Connection 的登录校验。 |
 | `sysmon.js` | 系统采样：`/proc/stat` 求 CPU 占用、`/proc/meminfo` 求内存、`/proc/diskstats` 求磁盘读写速率、`/proc/net/dev` 求网络速率、`/proc/mounts` + `statfs` 求各挂载点用量，另加负载均值和 40 点趋势环形缓存。全是累计计数器求差 + 可注入依赖，便于离线测试。 |
 | `usage.js` | 花费核算：订阅 `session/event`，把每条带 `usage` 的 `assistant/message` 按模型单价折成美元/人民币，按本地自然日归零；含 DeepSeek 高峰（UTC 01:00–04:00、06:00–10:00 工作日，价格翻倍）判定。 |
+| `spend-store.js` | 花费账本的持久化：启动时读取、静默 1 秒后原子写回（临时文件 + rename，权限 600）、插件卸载时再落一次盘。文件里只有日期、token 数和算出来的钱，没有 key。 |
 | `http.js` | 各路由共用的 JSON 响应构造。 |
 | `client.js` | 浏览器半边：`window.__ModuleLoader__.load` 注册懒工厂，注入 `settings.general.item` 与 `sidebar.footer.action` 两个槽位。 |
 | `cordis.patch.yml` | 作为 bundle 安装时的默认补丁（`install_bundle` 用）。 |
@@ -53,8 +54,22 @@ HMR 打开时保存文件即生效；没开 HMR 则重启 `dsh web`。
 | `sysmonIntervalMs` | `3000` | CPU/磁盘采样间隔；路由只读最近一次快照 |
 | `usdToCny` | `7.1` | 花费面板的美元→人民币汇率 |
 | `prices` | 内置 DeepSeek 价目 | 覆盖单价：`{ flash: { cacheHit, miss, output }, pro: {...} }`（USD / 1M tokens，平峰价；高峰自动 ×2） |
+| `stateFile` | `~/.local/state/dsh-balance/usage.json` | 花费账本路径，支持 `~/` |
+| `historyDays` | `30` | 账本保留多少天（面板展示最近 7 天） |
+| `flushDelayMs` | `1000` | 写盘防抖窗口 |
 
 key 的解析顺序：`config.apiKey` → 环境变量 `DEEPSEEK_API_KEY` → `apiKeyFile`。前两者存在时，界面上的「更换/清除」不会改变解析结果，那一行会提示「当前 key 来自插件配置/环境变量」。
+
+## 花费账本
+
+花费按本地自然日累计，写在 `stateFile` 里（默认 `~/.local/state/dsh-balance/usage.json`，600 权限，原子写入）：
+
+```json
+{ "version": 1, "days": [["2026-10-25", { "usd": 0.0611, "calls": 1, "cacheRead": 850000,
+  "miss": 150000, "output": 60000, "byModel": [["deepseek-flash", { ... }]] }]] }
+```
+
+重启后自动读回，今日金额和最近 7 天历史都还在；跨机器/重装把这一个文件拷走即可。删掉它等于把账本清零（余额不受影响）。
 
 ## 配置 key
 

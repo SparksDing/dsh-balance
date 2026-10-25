@@ -16,7 +16,8 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { json } from './http.js'
 import { registerSysmon } from './sysmon.js'
-import { registerUsage } from './usage.js'
+import { createUsageTracker, registerUsage } from './usage.js'
+import { startUsagePersistence } from './spend-store.js'
 
 /** Stable Cordis plugin name; the Client module registers under the package name. */
 export const name = '@local/dsh-balance'
@@ -37,7 +38,7 @@ const USAGE_PATH = '/api/deepseek-balance/usage'
 /** Unauthenticated liveness probe naming this plugin and nothing else. */
 const PING_PATH = '/dsh-balance/ping'
 /** Plugin version reported by the ping, so a running Host's loaded build is visible. */
-const VERSION = '0.5.1'
+const VERSION = '0.6.0'
 /** Key file used when neither config nor environment supplies one. */
 const DEFAULT_KEY_FILE = join(homedir(), '.config', 'deepseek', 'api_key')
 /** DeepSeek answers 401 for a missing, deleted, or mistyped key. */
@@ -294,10 +295,19 @@ export function apply(ctx, raw = {}) {
     intervalMs: Number(config.sysmonIntervalMs) > 0 ? Number(config.sysmonIntervalMs) : 3_000,
   })
 
-  const usagePath = registerUsage(ctx, {
-    path: USAGE_PATH,
+  const tracker = createUsageTracker({
     usdToCny: config.usdToCny,
     prices: config.prices,
+    historyDays: config.historyDays,
+  })
+  void startUsagePersistence(ctx, {
+    file: config.stateFile,
+    tracker,
+    flushDelayMs: config.flushDelayMs,
+  })
+  const usagePath = registerUsage(ctx, {
+    path: USAGE_PATH,
+    tracker,
     defaultModel: config.defaultModel,
   })
 

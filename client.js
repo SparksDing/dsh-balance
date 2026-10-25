@@ -80,6 +80,8 @@ window.__ModuleLoader__.load({
       spendCalls: '{n} 次调用 · {n2} 个会话',
       spendEmpty: '还没有用量记录（自本次启动起、按自然日统计）',
       spendModel: '{model}  命中 {hit} · 未命中 {miss} · 输出 {out}  {cny}',
+      spendRecent: '近 7 天 {cny}',
+      spendDay: '{day}  {cny}  {n} 次',
     }
 
     const en = {
@@ -136,6 +138,8 @@ window.__ModuleLoader__.load({
       spendCalls: '{n} calls · {n2} sessions',
       spendEmpty: 'No usage recorded yet (since this start, per calendar day)',
       spendModel: '{model}  hit {hit} · miss {miss} · out {out}  {cny}',
+      spendRecent: 'last 7 days {cny}',
+      spendDay: '{day}  {cny}  {n} calls',
     }
 
     /**
@@ -727,11 +731,15 @@ window.__ModuleLoader__.load({
         const parts = [t('spendToday', { cny: `¥${totals.cny.toFixed(2)}` })]
         if (totals.cacheHitPct !== null) parts.push(t('spendHit', { pct: totals.cacheHitPct }))
         lines.push(parts.join(' · '))
-        lines.push([
+        const recent = Array.isArray(data.recent) ? data.recent : []
+        const window = [
           data.peak ? t('spendPeak') : t('spendOffPeak'),
           t('spendCalls', { n: totals.calls, n2: totals.sessions }),
-        ].join(' · '))
+        ]
+        if (recent.length > 1) window.push(t('spendRecent', { cny: `¥${(data.recentCny ?? 0).toFixed(2)}` }))
+        lines.push(window.join(' · '))
       }
+      const recent = healthy && Array.isArray(data.recent) ? data.recent : []
       const details = open && healthy && totals.calls > 0
         ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 } },
           ...byModel.map(row => h('div', {
@@ -744,7 +752,14 @@ window.__ModuleLoader__.load({
             miss: row.missText,
             out: row.outputText,
             cny: `¥${row.cny.toFixed(2)}`,
-          }))))
+          }))),
+          recent.length < 2
+            ? null
+            : h('div', { style: { borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: 6, display: 'flex', flexDirection: 'column', gap: 4 } },
+              ...recent.map(entry => h('div', {
+                key: entry.day,
+                style: { ...TEXT.detail, whiteSpace: 'normal', fontVariantNumeric: 'tabular-nums' },
+              }, t('spendDay', { day: entry.day, cny: `¥${entry.cny.toFixed(2)}`, n: entry.calls })))))
         : null
       return h('div', {
         style: { padding: '16px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2)' },

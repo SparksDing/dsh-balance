@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-balance",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "DeepSeek 余额 + 消耗 + 系统状态（CPU/内存/磁盘/网络）：侧边栏胶囊 + 设置行 + 趋势图。",
@@ -13,6 +13,7 @@
     "http.js",
     "sysmon.js",
     "usage.js",
+    "spend-store.js",
     "client.js",
     "cordis.patch.yml",
     "README.md"

@@ -7,7 +7,7 @@
  *   node test/smoke.mjs
  */
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -54,6 +54,7 @@ const apiBase = `http://127.0.0.1:${server.address().port}`
 const host = await import(pathToFileURL(join(root, 'index.js')).href)
 const sysmon = await import(pathToFileURL(join(root, 'sysmon.js')).href)
 const usage = await import(pathToFileURL(join(root, 'usage.js')).href)
+const spendStore = await import(pathToFileURL(join(root, 'spend-store.js')).href)
 check('host exports the package name', host.name === '@local/dsh-balance', host.name)
 check('host injects connection and webServer', JSON.stringify(host.inject) === '["connection","webServer"]')
 
@@ -330,9 +331,78 @@ const near = (left, right, tolerance = 1e-9) => Math.abs(left - right) <= tolera
     first.totals.cacheHitPct === Math.round((100 * 850_000) / 1_100_000), String(first.totals.cacheHitPct))
   check('a usage-less event is not a call', first.totals.calls === 2)
 
+  check('the snapshot lists the recent days',
+    first.recent.length === 1 && first.recent[0].calls === 2 && first.recentCny > 0, JSON.stringify(first.recent))
+
+  const exported = tracker.exportState()
+  check('the exported ledger is serializable JSON',
+    JSON.parse(JSON.stringify(exported)).days.length === 1, JSON.stringify(exported).slice(0, 160))
+
+  const revived = usage.createUsageTracker({ now: () => clock, usdToCny: 7 })
+  revived.hydrate(JSON.parse(JSON.stringify(exported)))
+  const revivedSnapshot = revived.snapshot()
+  check('hydrating a ledger restores the day totals',
+    revivedSnapshot.totals.calls === 2 && near(revivedSnapshot.totals.usd, first.totals.usd, 1e-9),
+    JSON.stringify(revivedSnapshot.totals))
+
   clock = new Date(Date.UTC(2026, 9, 27, 12, 0))
   const next = tracker.snapshot()
-  check('a new local day resets the totals', next.totals.calls === 0 && next.byModel.length === 0, JSON.stringify(next))
+  check('a new local day starts a new bucket',
+    next.totals.calls === 0 && next.byModel.length === 0 && next.recent.length === 1, JSON.stringify(next.recent))
+}
+
+{
+  // History is capped so the ledger cannot grow without bound.
+  let clock = new Date(Date.UTC(2026, 0, 1, 12, 0))
+  const tracker = usage.createUsageTracker({ now: () => clock, historyDays: 3 })
+  for (let day = 0; day < 6; day += 1) {
+    clock = new Date(Date.UTC(2026, 0, 1 + day, 12, 0))
+    tracker.record({ model: 'deepseek-flash', time: clock.getTime(), usage: { inputTokens: 1000, outputTokens: 100 } })
+  }
+  const state = tracker.exportState()
+  check('the ledger keeps only the configured history window', state.days.length === 3, String(state.days.length))
+}
+
+// ── Ledger durability ────────────────────────────────────────────────────────
+
+{
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-balance-ledger-'))
+  const file = join(dir, 'nested', 'usage.json')
+  const tracker = usage.createUsageTracker({ usdToCny: 7 })
+  tracker.record({ model: 'deepseek-flash', time: Date.now(), usage: { inputTokens: 1_000_000, outputTokens: 10_000 } })
+  await spendStore.saveUsageState(file, tracker.exportState())
+  check('the ledger file is created', (await stat(file)).isFile())
+  const mode = (await stat(file)).mode & 0o777
+  check('the ledger file is 600', mode === 0o600, mode.toString(8))
+
+  const loaded = await spendStore.loadUsageState(file)
+  check('the ledger loads back', loaded !== undefined && loaded.days.length === 1, JSON.stringify(loaded).slice(0, 120))
+
+  const revived = usage.createUsageTracker({ usdToCny: 7 })
+  revived.hydrate(loaded)
+  check('a restarted tracker keeps today\'s spend',
+    revived.snapshot().totals.calls === 1 && near(revived.snapshot().totals.usd, tracker.snapshot().totals.usd, 1e-9),
+    JSON.stringify(revived.snapshot().totals))
+
+  await writeFile(file, '{ not json')
+  check('a corrupt ledger is ignored', (await spendStore.loadUsageState(file)) === undefined)
+
+  const effects = []
+  let listener
+  const ctx = {
+    effect(fn) { const dispose = fn(); effects.push(dispose); return () => {} },
+    logger: { warn() {} },
+  }
+  const live = usage.createUsageTracker({ usdToCny: 7 })
+  live.subscribe(fn => { listener = fn; return () => {} })
+  spendStore.startUsagePersistence(ctx, { file, tracker: live, flushDelayMs: 5 })
+  live.record({ model: 'deepseek-flash', time: Date.now(), usage: { inputTokens: 2000, outputTokens: 200 } })
+  await new Promise(resolve => setTimeout(resolve, 60))
+  const persisted = await spendStore.loadUsageState(file)
+  check('a recorded attempt is flushed to disk',
+    persisted !== undefined && persisted.days.length >= 1, JSON.stringify(persisted).slice(0, 120))
+  for (const dispose of effects) await dispose?.()
+  await rm(dir, { recursive: true, force: true })
 }
 
 {
@@ -622,6 +692,14 @@ const sysmonData = {
   check('spend row names the billing window', text.includes('spendOffPeak'), text)
   check('spend row offers the details toggle', text.includes('sysDetails'), text)
   check('spend row features the total on the right', text.includes('¥0.43'), text)
+
+  const withHistory = {
+    ...spendData,
+    recent: [{ day: '2026-10-25', cny: 0.43, calls: 12 }, { day: '2026-10-24', cny: 0.21, calls: 8 }],
+    recentCny: 0.64,
+  }
+  const historyText = textOf(spendRow.component({ t: translate, spend: storeState('ready', withHistory) }))
+  check('spend row summarises the persisted week', historyText.includes('spendRecent{"cny":"¥0.64"}'), historyText)
 
   const emptyData = { ...spendData, totals: { ...spendData.totals, calls: 0, cny: 0 }, byModel: [] }
   const empty = textOf(spendRow.component({ t: translate, spend: storeState('ready', emptyData) }))
