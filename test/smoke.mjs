@@ -354,6 +354,14 @@ const near = (left, right, tolerance = 1e-9) => Math.abs(left - right) <= tolera
   check('the usage route prices the observed attempt',
     body.ok === true && body.totals.calls === 1 && near(body.totals.usd, 0.0611, 1e-4), JSON.stringify(body.totals))
   check('the usage route names the model', body.byModel[0]?.model === 'deepseek-flash', JSON.stringify(body.byModel))
+
+  const late = []
+  const lateHandlers = []
+  usage.registerUsage({ effect: fn => { fn(); return () => {} }, on: (name, handler) => { lateHandlers.push(handler); return () => {} }, connection: { fetch: { register(route) { late.push(route); return () => {} } } } }, { path: '/api/x', defaultModel: 'deepseek-flash' })
+  lateHandlers[0]({ id: 's9' }, { type: 'assistant/message', time: Date.now(), data: { usage: { inputTokens: 1000, outputTokens: 100 } } })
+  const lateBody = await (await late[0].fetch(new Request('http://local/api/x'))).json()
+  check('an unobserved route is labelled with the default model',
+    lateBody.byModel[0]?.model === 'deepseek-flash', JSON.stringify(lateBody.byModel))
 }
 
 // ── Key write route ──────────────────────────────────────────────────────────

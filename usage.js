@@ -186,6 +186,9 @@ export function createUsageTracker(options = {}) {
  */
 export function registerUsage(ctx, options = {}) {
   const tracker = options.tracker ?? createUsageTracker(options)
+  // A session whose route metadata predates this plugin has no observed model;
+  // label it with the deployment default, which is the card it is priced with.
+  const defaultModel = options.defaultModel ?? 'deepseek-flash'
   /** Latest model per session, learned from route metadata events. */
   const models = new Map()
 
@@ -201,7 +204,7 @@ export function registerUsage(ctx, options = {}) {
     }
     if (event.type !== 'assistant/message' || event.data.usage === undefined) return
     tracker.record({
-      model: models.get(session.id),
+      model: models.get(session.id) ?? defaultModel,
       usage: event.data.usage,
       sessionId: session.id,
       time: event.time,

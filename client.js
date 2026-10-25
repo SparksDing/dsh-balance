@@ -74,12 +74,11 @@ window.__ModuleLoader__.load({
       sysPill: 'CPU {cpu}% · 磁盘 {disk}%',
       spendTitle: '消耗',
       spendToday: '今日 {cny}',
-      spendSince: '自启动 {cny}',
       spendHit: '缓存命中 {pct}%',
       spendPeak: '高峰（双倍计价）',
       spendOffPeak: '平峰（半价）',
       spendCalls: '{n} 次调用 · {n2} 个会话',
-      spendEmpty: '还没有用量记录（自本次启动起统计）',
+      spendEmpty: '还没有用量记录（自本次启动起、按自然日统计）',
       spendModel: '{model}  命中 {hit} · 未命中 {miss} · 输出 {out}  {cny}',
     }
 
@@ -131,12 +130,11 @@ window.__ModuleLoader__.load({
       sysPill: 'CPU {cpu}% · disk {disk}%',
       spendTitle: 'Spend',
       spendToday: 'today {cny}',
-      spendSince: 'since start {cny}',
       spendHit: 'cache hit {pct}%',
       spendPeak: 'Peak hours (×2)',
       spendOffPeak: 'Off-peak (½ price)',
       spendCalls: '{n} calls · {n2} sessions',
-      spendEmpty: 'No usage recorded yet (counted since this start)',
+      spendEmpty: 'No usage recorded yet (since this start, per calendar day)',
       spendModel: '{model}  hit {hit} · miss {miss} · out {out}  {cny}',
     }
 
@@ -726,10 +724,7 @@ window.__ModuleLoader__.load({
       } else if (totals.calls === 0) {
         lines.push(t('spendEmpty'))
       } else {
-        const parts = [
-          t('spendToday', { cny: `¥${totals.cny.toFixed(2)}` }),
-          t('spendSince', { cny: `¥${(totals.cny).toFixed(2)}` }),
-        ]
+        const parts = [t('spendToday', { cny: `¥${totals.cny.toFixed(2)}` })]
         if (totals.cacheHitPct !== null) parts.push(t('spendHit', { pct: totals.cacheHitPct }))
         lines.push(parts.join(' · '))
         lines.push([
