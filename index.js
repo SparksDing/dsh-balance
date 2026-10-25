@@ -29,6 +29,8 @@ const STATE_PATH = '/api/deepseek-balance/state'
 const KEY_PATH = '/api/deepseek-balance/key'
 /** Unauthenticated liveness probe naming this plugin and nothing else. */
 const PING_PATH = '/dsh-balance/ping'
+/** Plugin version reported by the ping, so a running Host's loaded build is visible. */
+const VERSION = '0.2.0'
 /** Key file used when neither config nor environment supplies one. */
 const DEFAULT_KEY_FILE = join(homedir(), '.config', 'deepseek', 'api_key')
 /** DeepSeek answers 401 for a missing, deleted, or mistyped key. */
@@ -298,7 +300,7 @@ export function apply(ctx, raw = {}) {
     path: PING_PATH,
     handler: (_request, response) => {
       response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-      response.end(JSON.stringify({ ok: true, plugin: name, route: STATE_PATH }))
+      response.end(JSON.stringify({ ok: true, plugin: name, version: VERSION, route: STATE_PATH }))
     },
   }), 'dsh-balance: ping route')
 
